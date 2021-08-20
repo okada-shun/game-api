@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
@@ -21,9 +22,14 @@ func main() {
 	router := mux.NewRouter().StrictSlash(true)
 	// URLと処理
 	router.HandleFunc("/", home)
+	// ユーザ関連API
 	router.HandleFunc("/user/create", createUser).Methods("POST")
 	router.HandleFunc("/user/get", getUser).Methods("GET")
 	router.HandleFunc("/user/update", updateUser).Methods("PUT")
+	// ガチャ関連API
+	router.HandleFunc("/gacha/draw", drawGacha).Methods("POST")
+	// キャラクター関連API
+	router.HandleFunc("/character/list", getCharacterList).Methods("GET")
 	// ポートを8080で指定してRouter起動
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
@@ -234,4 +240,197 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 	// dbでnameを更新
 	// UPDATE `users` SET `name` = 'z'  WHERE (id = '9')
 	db.Model(&user).Where("id = ?", id).Update("name", user.Name)
+}
+
+// Times構造体
+type Times struct {
+	ID    int `json:"id"`
+	Times int `json:"times"`
+}
+
+// Rarity構造体
+type Rarity struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Weight int    `json:"weight"`
+}
+
+// Character構造体
+type Character struct {
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Rarity string `json:"rarity"`
+}
+
+// UserCharacter構造体
+type UserCharacter struct {
+	ID          int    `json:"id"`
+	UserID      string `json:"user_id"`
+	CharacterID string `json:"character_id"`
+}
+
+type CharacterResponse struct {
+	CharacterID string `json:"characterID"`
+	Name        string `json:"name"`
+}
+
+// drawGacha関数で返される
+type ResultResponse struct {
+	Results []CharacterResponse `json:"results"`
+}
+
+type UserCharacterResponse struct {
+	UserCharacterID string `json:"userCharacterID"`
+	CharacterID     string `json:"characterID"`
+	Name            string `json:"name"`
+}
+
+// getCharacterList関数で返される
+type CharactersResponse struct {
+	Characters []UserCharacterResponse `json:"characters"`
+}
+
+// localhost:8080/gacha/drawでガチャを引いて、キャラクターを取得
+// -H "x-token:yyy"でトークン情報を受け取り、認証
+// -d {"times":x}でガチャを何回引くかの情報を受け取る
+func drawGacha(w http.ResponseWriter, r *http.Request) {
+	tokenString := r.Header.Get("x-token")
+	token, err := VerifyToken(tokenString)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	claims := token.Claims.(jwt.MapClaims)
+	id := claims["userId"].(string)
+	body, err := ioutil.ReadAll(r.Body)
+	defer r.Body.Close()
+	if err != nil {
+		RespondWithError(w, http.StatusBadRequest, "Invalid request")
+		return
+	}
+	var times Times
+	if err := json.Unmarshal(body, &times); err != nil {
+		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
+		return
+	}
+	db := GetConnection()
+	defer db.Close()
+	rarityValue := getRarity()
+	maxA := rarityValue[0].Weight
+	maxB := rarityValue[1].Weight
+	maxOne := maxA - 1
+	maxTwo := maxA + maxB - 1
+	// 引いたキャラのキャラクターIDが入る
+	var characterIdList []int
+	// 引いたキャラのキャラクターIDとキャラ名が入る
+	var characterInfo CharacterResponse
+	// 引いたキャラのキャラクターIDとキャラ名が、引いたキャラの数だけ入る
+	var results []CharacterResponse
+	// 0から99までの整数をランダムにtimes.Times回数分だけ生成
+	// 0以上maxOne未満でレア度が1のキャラを引き、maxOne以上maxTwo未満でレア度が2のキャラを引き、
+	// maxTwo以上99以下でレア度が3のキャラを引く
+	for i := 0; i < times.Times; i++ {
+		rand.Seed(time.Now().UnixNano())
+		randNumber := rand.Intn(100)
+		var character Character
+		if randNumber < maxOne {
+			// SELECT * FROM `characters`  WHERE (rarity = 1)
+			db.Where("rarity = 1").Find(&character)
+			characterIdList = append(characterIdList, character.ID)
+			characterInfo = CharacterResponse{CharacterID: strconv.Itoa(character.ID), Name: character.Name}
+			results = append(results, characterInfo)
+		} else if randNumber < maxTwo {
+			// SELECT * FROM `characters`  WHERE (rarity = 2)
+			db.Where("rarity = 2").Find(&character)
+			characterIdList = append(characterIdList, character.ID)
+			characterInfo = CharacterResponse{CharacterID: strconv.Itoa(character.ID), Name: character.Name}
+			results = append(results, characterInfo)
+		} else {
+			// SELECT * FROM `characters`  WHERE (rarity = 3)
+			db.Where("rarity = 3").Find(&character)
+			characterIdList = append(characterIdList, character.ID)
+			characterInfo = CharacterResponse{CharacterID: strconv.Itoa(character.ID), Name: character.Name}
+			results = append(results, characterInfo)
+		}
+	}
+	// 引いたキャラのキャラクターIDと、そのキャラの名前をUserCharacter構造体に入れ、
+	// dbのuser_charactersテーブルに格納していく
+	for _, v := range characterIdList {
+		userCharacter := UserCharacter{UserID: id, CharacterID: strconv.Itoa(v)}
+		db.Create(&userCharacter)
+	}
+	Success(w, &ResultResponse{
+		Results: results,
+	})
+	/*
+		{"results":[
+			{"characterID":"3","name":"Carol"},
+			{"characterID":"3","name":"Carol"},
+			...
+			{"characterID":"3","name":"Carol"}
+		]}
+		が返る
+	*/
+}
+
+// dbのraritiesテーブルに接続、全データを取得
+// SELECT * FROM `rarities`
+func getRarity() []Rarity {
+	db := GetConnection()
+	var rarity []Rarity
+	db.Find(&rarity)
+	return rarity
+}
+
+// dbのcharactersテーブルに接続、idが引数idのデータを取得
+// SELECT * FROM `characters`  WHERE (id = 1)
+// 取得したデータのうち、名前データを返す
+func getCharacterName(id int) string {
+	db := GetConnection()
+	var character Character
+	db.Where("id = ?", id).Find(&character)
+	return character.Name
+}
+
+// dbのuser_charactersテーブルに接続、user_idが引数user_idのデータを取得
+// SELECT * FROM `user_characters`  WHERE (user_id = '1')
+func getUserCharacterList(user_id string) []UserCharacter {
+	db := GetConnection()
+	var userCharacterList []UserCharacter
+	db.Where("user_id = ?", user_id).Find(&userCharacterList)
+	return userCharacterList
+}
+
+// localhost:8080/character/listでユーザが所持しているキャラクター一覧情報を取得
+// -H "x-token:yyy"でトークン情報を受け取り、認証
+func getCharacterList(w http.ResponseWriter, r *http.Request) {
+	tokenString := r.Header.Get("x-token")
+	token, err := VerifyToken(tokenString)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	claims := token.Claims.(jwt.MapClaims)
+	id := claims["userId"].(string)
+	userCharacterList := getUserCharacterList(id)
+	var characters []UserCharacterResponse
+	var userCharacterInfo UserCharacterResponse
+	for _, v := range userCharacterList {
+		id, _ := strconv.Atoi(v.CharacterID)
+		characterName := getCharacterName(id)
+		userCharacterInfo = UserCharacterResponse{UserCharacterID: strconv.Itoa(v.ID), CharacterID: v.CharacterID, Name: characterName}
+		characters = append(characters, userCharacterInfo)
+	}
+	Success(w, &CharactersResponse{
+		Characters: characters,
+	})
+	/*
+		{"characters":[
+			{"userCharacterID":"1","characterID":"3","name":"Carol"},
+			{"userCharacterID":"2","characterID":"3","name":"Carol"},
+			...
+			{"userCharacterID":"100","characterID":"3","name":"Carol"}
+		]}
+		が返る
+	*/
 }
