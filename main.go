@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jinzhu/gorm"
 
@@ -19,7 +20,7 @@ import (
 
 func main() {
 	// Router作成
-	router := mux.NewRouter().StrictSlash(true)
+	router := mux.NewRouter()
 	// URLと処理
 	router.HandleFunc("/", home)
 	// ユーザ関連API
@@ -55,26 +56,30 @@ func RespondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 func GetConnection() *gorm.DB {
 	db, err := gorm.Open("mysql", "okada:password@/game_user?charset=utf8&parseTime=True&loc=Local")
 	if err != nil {
-		log.Fatalf("DB connection failed %v", err)
+		log.Printf("DB connection failed %v", err)
 	}
 	db.LogMode(true)
 	return db
 }
 
-// User構造体
-type User struct {
-	ID   int    `json:"id"`
+type UserName struct {
 	Name string `json:"name"`
 }
 
-// createUser関数で作成されたjwtトークンが入る
+type User struct {
+	ID     int    `json:"id"`
+	UserID string `json:"user_id"`
+	Name   string `json:"name"`
+}
+
 type TokenResponse struct {
 	Token string `json:"token"`
 }
 
 // localhost:8080/user/createでユーザ情報を作成
-// -d {"name":"x"}で名前情報を受け取り、dbに挿入
-// dbのIDからjwtトークンを作成し、トークンを返す
+// -d {"name":"x"}で名前情報を受け取る
+// UUIDでユーザIDを生成する
+// ユーザIDからjwtでトークンを作成し、トークンを返す
 func createUser(w http.ResponseWriter, r *http.Request) {
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
@@ -83,53 +88,69 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// string(body) = {"name": "x"}
-	var user User
-	if err := json.Unmarshal(body, &user); err != nil {
+	var userName UserName
+	if err := json.Unmarshal(body, &userName); err != nil {
 		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
 		return
 	}
-	// user = {0 x}
-	// &user = &{0 x}
+	userId := createId()
+	user := User{UserID: userId, Name: userName.Name}
 	db := GetConnection()
 	defer db.Close()
-	// INSERT INTO `users` (`name`) VALUES ('x')
+	// INSERT INTO `users` (`user_id`,`name`) VALUES ('bdd4056a-f113-424c-9951-1eaaaf853e5c','Tamachan')
 	db.Create(&user)
-	// ユーザIDの文字列からjwtトークン作成
-	token, err := CreateToken(strconv.Itoa(user.ID))
+	// ユーザIDの文字列からjwtでトークン作成
+	token, err := CreateToken(userId)
 	if err != nil {
 		ErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	// token = "生成されたトークンの文字列"
-	Success(w, &TokenResponse{
+	Success(w, http.StatusOK, &TokenResponse{
 		Token: token,
 	})
 	// {"token":"生成されたトークンの文字列"}が返る
 }
 
-// ユーザIDからjwtトークンを作成
-// 有効期限は1時間に設定
+// ユーザIDからjwtでトークンを作成
+// 有効期限は24時間に設定
 // jwtのペイロードにはユーザIDと有効期限の時刻を設定
 func CreateToken(userID string) (string, error) {
 	// HS256は256ビットのハッシュ値を生成するアルゴリズム
 	token := jwt.New(jwt.GetSigningMethod("HS256"))
-	// ペイロードにユーザIDと有効期限の時刻(1時間後)を設定
+	// ペイロードにユーザIDと有効期限の時刻(24時間後)を設定
 	token.Claims = jwt.MapClaims{
 		"userId": userID,
-		"exp":    time.Now().Add(time.Hour * 1).Unix(),
+		"exp":    time.Now().Add(time.Hour * 24).Unix(),
+	}
+	// 秘密鍵を取得
+	signBytes, err := ioutil.ReadFile("../.ssh/id_rsa")
+	if err != nil {
+		fmt.Println(err)
 	}
 	// 秘密鍵で署名
-	var secretKey = "secret"
-	tokenString, err := token.SignedString([]byte(secretKey))
+	tokenString, err := token.SignedString(signBytes)
 	if err != nil {
 		return "", err
 	}
 	return tokenString, nil
 }
 
-func Success(w http.ResponseWriter, data interface{}) {
+// UUIDでユーザIDを生成
+func createId() string {
+	u, err := uuid.NewRandom()
+	if err != nil {
+		fmt.Println(err)
+		return ""
+	}
+	uu := u.String()
+	return uu
+}
+
+func Success(w http.ResponseWriter, code int, data interface{}) {
 	jsonData, _ := json.Marshal(data)
 	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(code)
 	w.Write(jsonData)
 }
 
@@ -146,7 +167,7 @@ func ErrorResponse(w http.ResponseWriter, code int, message string) {
 		Message: message,
 	})
 	if err != nil {
-		log.Fatal("json marshal error")
+		log.Println("json marshal error")
 	}
 	w.WriteHeader(code)
 	w.Header().Add("Content-Type", "application/json")
@@ -158,8 +179,8 @@ type UserResponse struct {
 	Name string `json:"name"`
 }
 
-// -H "x-token:yyy"でトークン情報を受け取り、認証
-// トークンからユーザIDを取り出し、dbからそのIDのユーザの名前情報を取り出し、返す
+// -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
+// トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を取り出し、返す
 func getUser(w http.ResponseWriter, r *http.Request) {
 	tokenString := r.Header.Get("x-token")
 	// tokenString = yyy
@@ -170,20 +191,22 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	/*例
-	token = &{eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE2MjkyOTIzNjAsInVzZXJJZCI6IjkifQ.
-	QNASvnRbfNTwML9pKjVkA3EusbfxLsQr711iqA2hJLo 0xc00000e0c0
-	map[alg:HS256 typ:JWT] map[exp:1.62929236e+09 userId:9] QNASvnRbfNTwML9pKjVkA3EusbfxLsQr711iqA2hJLo true}
+	token = &{eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.
+		eyJleHAiOjE2Mjk2Mzk4MDgsInVzZXJJZCI6ImJkZDQwNTZhLWYxMTMtNDI0Yy05OTUxLTFlYWFhZjg1M2U1YyJ9.
+		xlSV0fVPtzWfjGT7GQc5sACnrS2R4T4B-ivxq15eagc 0xc00000e0c0
+		map[alg:HS256 typ:JWT] map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
+		xlSV0fVPtzWfjGT7GQc5sACnrS2R4T4B-ivxq15eagc true}
 	*/
 	db := GetConnection()
 	defer db.Close()
 	claims := token.Claims.(jwt.MapClaims)
-	// claims = map[exp:1.62929236e+09 userId:9]
-	id := claims["userId"]
-	// id = 9
+	// claims = map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
+	userId := claims["userId"]
+	// userId = bdd4056a-f113-424c-9951-1eaaaf853e5c
 	var user User
-	// SELECT * FROM `users`  WHERE (id = '9')
-	db.Where("id = ?", id).Find(&user)
-	Success(w, &UserResponse{
+	// SELECT * FROM `users`  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
+	db.Where("user_id = ?", userId).Find(&user)
+	Success(w, http.StatusOK, &UserResponse{
 		Name: user.Name,
 	})
 	// {"name":"x"}が返る
@@ -192,9 +215,13 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 
 // jwtトークンを認証する
 func VerifyToken(tokenString string) (*jwt.Token, error) {
-	// "secret"は秘密鍵
+	// 秘密鍵を取得
+	signBytes, err := ioutil.ReadFile("../.ssh/id_rsa")
+	if err != nil {
+		fmt.Println(err)
+	}
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return []byte("secret"), nil
+		return signBytes, nil
 	})
 	if err != nil {
 		return nil, err
@@ -202,9 +229,9 @@ func VerifyToken(tokenString string) (*jwt.Token, error) {
 	return token, nil
 }
 
-// -H "x-token:yyy"でトークン情報を受け取り、認証
+// -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
 // -d {"name":"z"}で更新する名前情報を受け取る
-// トークンからユーザIDを取り出し、dbからそのIDのユーザの名前情報を更新
+// トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を更新
 func updateUser(w http.ResponseWriter, r *http.Request) {
 	tokenString := r.Header.Get("x-token")
 	// tokenString = yyy
@@ -215,9 +242,11 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	/*例
-	token = &{eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE2MjkyOTIzNjAsInVzZXJJZCI6IjkifQ.
-	QNASvnRbfNTwML9pKjVkA3EusbfxLsQr711iqA2hJLo 0xc00000e0c0
-	map[alg:HS256 typ:JWT] map[exp:1.62929236e+09 userId:9] QNASvnRbfNTwML9pKjVkA3EusbfxLsQr711iqA2hJLo true}
+	token = &{eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.
+		eyJleHAiOjE2Mjk2Mzk4MDgsInVzZXJJZCI6ImJkZDQwNTZhLWYxMTMtNDI0Yy05OTUxLTFlYWFhZjg1M2U1YyJ9.
+		xlSV0fVPtzWfjGT7GQc5sACnrS2R4T4B-ivxq15eagc 0xc00000e0c0
+		map[alg:HS256 typ:JWT] map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
+		xlSV0fVPtzWfjGT7GQc5sACnrS2R4T4B-ivxq15eagc true}
 	*/
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
@@ -226,43 +255,40 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// string(body) = {"name": "z"}
-	var user User
-	if err := json.Unmarshal(body, &user); err != nil {
+	var userName UserName
+	if err := json.Unmarshal(body, &userName); err != nil {
 		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
 		return
 	}
+	var user User
 	db := GetConnection()
 	defer db.Close()
 	claims := token.Claims.(jwt.MapClaims)
-	// claims = map[exp:1.62929236e+09 userId:9]
-	id := claims["userId"]
-	// id = 9
+	// claims = map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
+	userId := claims["userId"]
+	// userId = bdd4056a-f113-424c-9951-1eaaaf853e5c
 	// dbでnameを更新
-	// UPDATE `users` SET `name` = 'z'  WHERE (id = '9')
-	db.Model(&user).Where("id = ?", id).Update("name", user.Name)
+	// UPDATE `users` SET `name` = 'Hamachan'  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
+	db.Model(&user).Where("user_id = ?", userId).Update("name", userName.Name)
+	Success(w, http.StatusOK, "")
 }
 
-// Times構造体
 type Times struct {
-	ID    int `json:"id"`
 	Times int `json:"times"`
 }
 
-// Rarity構造体
 type Rarity struct {
 	ID     int    `json:"id"`
 	Name   string `json:"name"`
 	Weight int    `json:"weight"`
 }
 
-// Character構造体
 type Character struct {
 	ID     int    `json:"id"`
 	Name   string `json:"name"`
 	Rarity string `json:"rarity"`
 }
 
-// UserCharacter構造体
 type UserCharacter struct {
 	ID          int    `json:"id"`
 	UserID      string `json:"user_id"`
@@ -359,7 +385,7 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 		userCharacter := UserCharacter{UserID: id, CharacterID: strconv.Itoa(v)}
 		db.Create(&userCharacter)
 	}
-	Success(w, &ResultResponse{
+	Success(w, http.StatusOK, &ResultResponse{
 		Results: results,
 	})
 	/*
@@ -377,6 +403,7 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 // SELECT * FROM `rarities`
 func getRarity() []Rarity {
 	db := GetConnection()
+	defer db.Close()
 	var rarity []Rarity
 	db.Find(&rarity)
 	return rarity
@@ -387,6 +414,7 @@ func getRarity() []Rarity {
 // 取得したデータのうち、名前データを返す
 func getCharacterName(id int) string {
 	db := GetConnection()
+	defer db.Close()
 	var character Character
 	db.Where("id = ?", id).Find(&character)
 	return character.Name
@@ -396,6 +424,7 @@ func getCharacterName(id int) string {
 // SELECT * FROM `user_characters`  WHERE (user_id = '1')
 func getUserCharacterList(user_id string) []UserCharacter {
 	db := GetConnection()
+	defer db.Close()
 	var userCharacterList []UserCharacter
 	db.Where("user_id = ?", user_id).Find(&userCharacterList)
 	return userCharacterList
@@ -421,7 +450,7 @@ func getCharacterList(w http.ResponseWriter, r *http.Request) {
 		userCharacterInfo = UserCharacterResponse{UserCharacterID: strconv.Itoa(v.ID), CharacterID: v.CharacterID, Name: characterName}
 		characters = append(characters, userCharacterInfo)
 	}
-	Success(w, &CharactersResponse{
+	Success(w, http.StatusOK, &CharactersResponse{
 		Characters: characters,
 	})
 	/*
