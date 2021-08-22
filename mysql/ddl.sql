@@ -9,6 +9,7 @@ SHOW GRANTS FOR 'okada'@'localhost';
 DROP TABLE IF EXISTS `game_user`.`users`;
 CREATE TABLE IF NOT EXISTS `game_user`.`users`(
   `id` INT PRIMARY KEY AUTO_INCREMENT,
+  `user_id` VARCHAR(100) NOT NULL,
   `name` VARCHAR(32) NOT NULL
 );
 
