@@ -7,7 +7,6 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -52,9 +51,17 @@ func RespondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(response)
 }
 
-// DataBase(game_user)と接続
+// DataBase(game_user)からコネクション取得
 func GetConnection() *gorm.DB {
-	db, err := gorm.Open("mysql", "okada:password@/game_user?charset=utf8&parseTime=True&loc=Local")
+	passwordBytes, err := ioutil.ReadFile("../.ssh/mysql_password")
+	if err != nil {
+		fmt.Println(err)
+	}
+	userBytes, err := ioutil.ReadFile("../.ssh/mysql_user")
+	if err != nil {
+		fmt.Println(err)
+	}
+	db, err := gorm.Open("mysql", string(userBytes)+":"+string(passwordBytes)+"@/game_user?charset=utf8&parseTime=True&loc=Local")
 	if err != nil {
 		log.Printf("DB connection failed %v", err)
 	}
@@ -182,27 +189,12 @@ type UserResponse struct {
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
 // トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を取り出し、返す
 func getUser(w http.ResponseWriter, r *http.Request) {
-	tokenString := r.Header.Get("x-token")
-	// tokenString = yyy
-	// VerifyToken関数で認証
-	token, err := VerifyToken(tokenString)
-	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+	userId := getUserId(w, r)
+	if userId == "" {
 		return
 	}
-	/*例
-	token = &{eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.
-		eyJleHAiOjE2Mjk2Mzk4MDgsInVzZXJJZCI6ImJkZDQwNTZhLWYxMTMtNDI0Yy05OTUxLTFlYWFhZjg1M2U1YyJ9.
-		xlSV0fVPtzWfjGT7GQc5sACnrS2R4T4B-ivxq15eagc 0xc00000e0c0
-		map[alg:HS256 typ:JWT] map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
-		xlSV0fVPtzWfjGT7GQc5sACnrS2R4T4B-ivxq15eagc true}
-	*/
 	db := GetConnection()
 	defer db.Close()
-	claims := token.Claims.(jwt.MapClaims)
-	// claims = map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
-	userId := claims["userId"]
-	// userId = bdd4056a-f113-424c-9951-1eaaaf853e5c
 	var user User
 	// SELECT * FROM `users`  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
 	db.Where("user_id = ?", userId).Find(&user)
@@ -230,24 +222,28 @@ func VerifyToken(tokenString string) (*jwt.Token, error) {
 }
 
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
-// -d {"name":"z"}で更新する名前情報を受け取る
-// トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を更新
-func updateUser(w http.ResponseWriter, r *http.Request) {
+// トークンから名前情報を取り出し、返す
+func getUserId(w http.ResponseWriter, r *http.Request) string {
 	tokenString := r.Header.Get("x-token")
-	// tokenString = yyy
-	// VerifyToken関数で認証
 	token, err := VerifyToken(tokenString)
 	if err != nil {
 		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		return ""
+	}
+	claims := token.Claims.(jwt.MapClaims)
+	// claims = map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
+	userId := claims["userId"].(string)
+	return userId
+}
+
+// -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
+// -d {"name":"z"}で更新する名前情報を受け取る
+// トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を更新
+func updateUser(w http.ResponseWriter, r *http.Request) {
+	userId := getUserId(w, r)
+	if userId == "" {
 		return
 	}
-	/*例
-	token = &{eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.
-		eyJleHAiOjE2Mjk2Mzk4MDgsInVzZXJJZCI6ImJkZDQwNTZhLWYxMTMtNDI0Yy05OTUxLTFlYWFhZjg1M2U1YyJ9.
-		xlSV0fVPtzWfjGT7GQc5sACnrS2R4T4B-ivxq15eagc 0xc00000e0c0
-		map[alg:HS256 typ:JWT] map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
-		xlSV0fVPtzWfjGT7GQc5sACnrS2R4T4B-ivxq15eagc true}
-	*/
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
@@ -263,36 +259,32 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 	var user User
 	db := GetConnection()
 	defer db.Close()
-	claims := token.Claims.(jwt.MapClaims)
-	// claims = map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
-	userId := claims["userId"]
-	// userId = bdd4056a-f113-424c-9951-1eaaaf853e5c
 	// dbでnameを更新
 	// UPDATE `users` SET `name` = 'Hamachan'  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
 	db.Model(&user).Where("user_id = ?", userId).Update("name", userName.Name)
-	Success(w, http.StatusOK, "")
+	Success(w, http.StatusOK, nil)
 }
 
 type Times struct {
 	Times int `json:"times"`
 }
 
-type Rarity struct {
-	ID     int    `json:"id"`
-	Name   string `json:"name"`
-	Weight int    `json:"weight"`
+type Weight struct {
+	Weight int `json:"weight"`
 }
 
 type Character struct {
-	ID     int    `json:"id"`
-	Name   string `json:"name"`
-	Rarity string `json:"rarity"`
+	ID          int    `json:"id"`
+	CharacterID string `json:"character_id"`
+	Name        string `json:"name"`
+	Weight      int    `json:"weight"`
 }
 
 type UserCharacter struct {
-	ID          int    `json:"id"`
-	UserID      string `json:"user_id"`
-	CharacterID string `json:"character_id"`
+	ID              int    `json:"id"`
+	UserCharacterID string `json:"user_character_id"`
+	UserID          string `json:"user_id"`
+	CharacterID     string `json:"character_id"`
 }
 
 type CharacterResponse struct {
@@ -320,14 +312,10 @@ type CharactersResponse struct {
 // -H "x-token:yyy"でトークン情報を受け取り、認証
 // -d {"times":x}でガチャを何回引くかの情報を受け取る
 func drawGacha(w http.ResponseWriter, r *http.Request) {
-	tokenString := r.Header.Get("x-token")
-	token, err := VerifyToken(tokenString)
-	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+	userId := getUserId(w, r)
+	if userId == "" {
 		return
 	}
-	claims := token.Claims.(jwt.MapClaims)
-	id := claims["userId"].(string)
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
@@ -341,48 +329,82 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 	}
 	db := GetConnection()
 	defer db.Close()
-	rarityValue := getRarity()
-	maxA := rarityValue[0].Weight
-	maxB := rarityValue[1].Weight
-	maxOne := maxA - 1
-	maxTwo := maxA + maxB - 1
-	// 引いたキャラのキャラクターIDが入る
-	var characterIdList []int
-	// 引いたキャラのキャラクターIDとキャラ名が入る
-	var characterInfo CharacterResponse
-	// 引いたキャラのキャラクターIDとキャラ名が、引いたキャラの数だけ入る
-	var results []CharacterResponse
-	// 0から99までの整数をランダムにtimes.Times回数分だけ生成
-	// 0以上maxOne未満でレア度が1のキャラを引き、maxOne以上maxTwo未満でレア度が2のキャラを引き、
-	// maxTwo以上99以下でレア度が3のキャラを引く
+	characters := getCharacter()
+	type IDWeightSum struct {
+		ID        int
+		WeightSum int
+	}
+	var idWeightSums []IDWeightSum
+	arrayZero := IDWeightSum{ID: 0, WeightSum: 0}
+	idWeightSums = append(idWeightSums, arrayZero)
+	charactersCount := len(characters)
+	var weightCount int
+	for i := 0; i < charactersCount; i++ {
+		id := characters[i].ID
+		w := characters[i].Weight
+		weightCount += w
+		arrayI := IDWeightSum{ID: id, WeightSum: weightCount}
+		idWeightSums = append(idWeightSums, arrayI)
+	}
+	var randNumbers []int
 	for i := 0; i < times.Times; i++ {
 		rand.Seed(time.Now().UnixNano())
-		randNumber := rand.Intn(100)
-		var character Character
-		if randNumber < maxOne {
-			// SELECT * FROM `characters`  WHERE (rarity = 1)
-			db.Where("rarity = 1").Find(&character)
-			characterIdList = append(characterIdList, character.ID)
-			characterInfo = CharacterResponse{CharacterID: strconv.Itoa(character.ID), Name: character.Name}
-			results = append(results, characterInfo)
-		} else if randNumber < maxTwo {
-			// SELECT * FROM `characters`  WHERE (rarity = 2)
-			db.Where("rarity = 2").Find(&character)
-			characterIdList = append(characterIdList, character.ID)
-			characterInfo = CharacterResponse{CharacterID: strconv.Itoa(character.ID), Name: character.Name}
-			results = append(results, characterInfo)
-		} else {
-			// SELECT * FROM `characters`  WHERE (rarity = 3)
-			db.Where("rarity = 3").Find(&character)
-			characterIdList = append(characterIdList, character.ID)
-			characterInfo = CharacterResponse{CharacterID: strconv.Itoa(character.ID), Name: character.Name}
-			results = append(results, characterInfo)
+		randNumber := rand.Intn(weightCount)
+		randNumbers = append(randNumbers, randNumber)
+	}
+	fmt.Println(weightCount)
+	fmt.Println(idWeightSums)
+	fmt.Println(randNumbers)
+	// [{0 0} {1 10} {2 40} {3 100} {4 200}]
+	// [164 127 118 10 119 180 197 155 29 69]
+	type RandNumberCount struct {
+		ID    int
+		Count int
+	}
+	var randNumberCount RandNumberCount
+	var randNumberCounts []RandNumberCount
+	for i := 0; i < len(idWeightSums)-1; i++ {
+		min := idWeightSums[i].WeightSum
+		max := idWeightSums[i+1].WeightSum
+		var count int
+		for _, v := range randNumbers {
+			if min <= v && v < max {
+				count += 1
+			}
+		}
+		randNumberCount = RandNumberCount{ID: idWeightSums[i+1].ID, Count: count}
+		randNumberCounts = append(randNumberCounts, randNumberCount)
+	}
+	fmt.Println(randNumberCounts)
+	var idNumbers []int
+	for _, v := range randNumberCounts {
+		id := v.ID
+		n := v.Count
+		for i := 0; i < n; i++ {
+			idNumbers = append(idNumbers, id)
 		}
 	}
-	// 引いたキャラのキャラクターIDと、そのキャラの名前をUserCharacter構造体に入れ、
-	// dbのuser_charactersテーブルに格納していく
+	fmt.Println(idNumbers)
+	shuffle(idNumbers)
+	fmt.Println(idNumbers)
+	var characterIdList []string
+	var characterInfo CharacterResponse
+	var results []CharacterResponse
+	for _, id := range idNumbers {
+		var character Character
+		// SELECT * FROM `characters`  WHERE (id = 3)
+		db.Where("id = ?", id).Find(&character)
+		characterIdList = append(characterIdList, character.CharacterID)
+		characterInfo = CharacterResponse{CharacterID: character.CharacterID, Name: character.Name}
+		results = append(results, characterInfo)
+	}
 	for _, v := range characterIdList {
-		userCharacter := UserCharacter{UserID: id, CharacterID: strconv.Itoa(v)}
+		userCharacterId := createId()
+		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, CharacterID: v}
+		/*
+			INSERT INTO `user_characters` (`user_character_id`,`user_id`,`character_id`)
+			VALUES ('02091c4d-1011-4615-8fbb-fd9e681153d4','703a0b0a-1541-487e-be5b-906e9541b021','c115174c-05ad-11ec-8679-a0c58933fdce')
+		*/
 		db.Create(&userCharacter)
 	}
 	Success(w, http.StatusOK, &ResultResponse{
@@ -390,33 +412,43 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 	})
 	/*
 		{"results":[
-			{"characterID":"3","name":"Carol"},
-			{"characterID":"3","name":"Carol"},
+			{"characterID":"c115174c-05ad-11ec-8679-a0c58933fdce","name":"Carol_N"},
+			{"characterID":"c115174c-05ad-11ec-8679-a0c58933fdce","name":"Carol_N"},
 			...
-			{"characterID":"3","name":"Carol"}
+			{"characterID":"c115174c-05ad-11ec-8679-a0c58933fdce","name":"Carol_N"}
 		]}
 		が返る
 	*/
 }
 
-// dbのraritiesテーブルに接続、全データを取得
-// SELECT * FROM `rarities`
-func getRarity() []Rarity {
+// dbからcharactersテーブルの情報を取得
+func getCharacter() []Character {
 	db := GetConnection()
 	defer db.Close()
-	var rarity []Rarity
-	db.Find(&rarity)
-	return rarity
+	var character []Character
+	// SELECT * FROM `characters`
+	db.Find(&character)
+	return character
 }
 
-// dbのcharactersテーブルに接続、idが引数idのデータを取得
+// 引数の配列をシャッフルする
+func shuffle(data []int) {
+	n := len(data)
+	for i := n - 1; i >= 0; i-- {
+		j := rand.Intn(i + 1)
+		data[i], data[j] = data[j], data[i]
+	}
+}
+
+// dbのcharactersテーブルに接続、character_idが引数character_idのデータを取得
 // SELECT * FROM `characters`  WHERE (id = 1)
 // 取得したデータのうち、名前データを返す
-func getCharacterName(id int) string {
+func getCharacterName(character_id string) string {
 	db := GetConnection()
 	defer db.Close()
 	var character Character
-	db.Where("id = ?", id).Find(&character)
+	// SELECT * FROM `characters`  WHERE (character_id = 'c115174c-05ad-11ec-8679-a0c58933fdce')
+	db.Where("character_id = ?", character_id).Find(&character)
 	return character.Name
 }
 
@@ -426,6 +458,7 @@ func getUserCharacterList(user_id string) []UserCharacter {
 	db := GetConnection()
 	defer db.Close()
 	var userCharacterList []UserCharacter
+	// SELECT * FROM `user_characters`  WHERE (user_id = '703a0b0a-1541-487e-be5b-906e9541b021')
 	db.Where("user_id = ?", user_id).Find(&userCharacterList)
 	return userCharacterList
 }
@@ -433,21 +466,17 @@ func getUserCharacterList(user_id string) []UserCharacter {
 // localhost:8080/character/listでユーザが所持しているキャラクター一覧情報を取得
 // -H "x-token:yyy"でトークン情報を受け取り、認証
 func getCharacterList(w http.ResponseWriter, r *http.Request) {
-	tokenString := r.Header.Get("x-token")
-	token, err := VerifyToken(tokenString)
-	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+	userId := getUserId(w, r)
+	if userId == "" {
 		return
 	}
-	claims := token.Claims.(jwt.MapClaims)
-	id := claims["userId"].(string)
-	userCharacterList := getUserCharacterList(id)
+	userCharacterList := getUserCharacterList(userId)
 	var characters []UserCharacterResponse
 	var userCharacterInfo UserCharacterResponse
 	for _, v := range userCharacterList {
-		id, _ := strconv.Atoi(v.CharacterID)
-		characterName := getCharacterName(id)
-		userCharacterInfo = UserCharacterResponse{UserCharacterID: strconv.Itoa(v.ID), CharacterID: v.CharacterID, Name: characterName}
+		character_id := v.CharacterID
+		characterName := getCharacterName(character_id)
+		userCharacterInfo = UserCharacterResponse{UserCharacterID: v.UserCharacterID, CharacterID: character_id, Name: characterName}
 		characters = append(characters, userCharacterInfo)
 	}
 	Success(w, http.StatusOK, &CharactersResponse{
@@ -455,10 +484,10 @@ func getCharacterList(w http.ResponseWriter, r *http.Request) {
 	})
 	/*
 		{"characters":[
-			{"userCharacterID":"1","characterID":"3","name":"Carol"},
-			{"userCharacterID":"2","characterID":"3","name":"Carol"},
+			{"userCharacterID":"02091c4d-1011-4615-8fbb-fd9e681153d4","characterID":"c115174c-05ad-11ec-8679-a0c58933fdce","name":"Carol_N"},
+			{"userCharacterID":"0fed4c04-153c-4980-9a66-1424f1f7a445","characterID":"c115174c-05ad-11ec-8679-a0c58933fdce","name":"Carol_N"},
 			...
-			{"userCharacterID":"100","characterID":"3","name":"Carol"}
+			{"userCharacterID":"95a281d5-86f0-4251-a4cb-5873231f4a96","characterID":"c115174c-05ad-11ec-8679-a0c58933fdce","name":"Carol_N"}
 		]}
 		が返る
 	*/
