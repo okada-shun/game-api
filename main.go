@@ -74,7 +74,7 @@ type UserName struct {
 }
 
 type User struct {
-	ID     int    `json:"id"`
+	// ID     int    `json:"id"`
 	UserID string `json:"user_id"`
 	Name   string `json:"name"`
 }
@@ -100,7 +100,7 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
 		return
 	}
-	userId := createId()
+	userId := createUUId()
 	user := User{UserID: userId, Name: userName.Name}
 	db := GetConnection()
 	defer db.Close()
@@ -144,7 +144,7 @@ func CreateToken(userID string) (string, error) {
 }
 
 // UUIDでユーザIDを生成
-func createId() string {
+func createUUId() string {
 	u, err := uuid.NewRandom()
 	if err != nil {
 		fmt.Println(err)
@@ -269,19 +269,13 @@ type Times struct {
 	Times int `json:"times"`
 }
 
-type Weight struct {
-	Weight int `json:"weight"`
-}
-
 type Character struct {
-	ID          int    `json:"id"`
 	CharacterID string `json:"character_id"`
 	Name        string `json:"name"`
 	Weight      int    `json:"weight"`
 }
 
 type UserCharacter struct {
-	ID              int    `json:"id"`
 	UserCharacterID string `json:"user_character_id"`
 	UserID          string `json:"user_id"`
 	CharacterID     string `json:"character_id"`
@@ -331,19 +325,19 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 	defer db.Close()
 	characters := getCharacter()
 	type IDWeightSum struct {
-		ID        int
-		WeightSum int
+		CharacterID string
+		WeightSum   int
 	}
 	var idWeightSums []IDWeightSum
-	arrayZero := IDWeightSum{ID: 0, WeightSum: 0}
+	arrayZero := IDWeightSum{CharacterID: "", WeightSum: 0}
 	idWeightSums = append(idWeightSums, arrayZero)
 	charactersCount := len(characters)
 	var weightCount int
 	for i := 0; i < charactersCount; i++ {
-		id := characters[i].ID
+		characterId := characters[i].CharacterID
 		w := characters[i].Weight
 		weightCount += w
-		arrayI := IDWeightSum{ID: id, WeightSum: weightCount}
+		arrayI := IDWeightSum{CharacterID: characterId, WeightSum: weightCount}
 		idWeightSums = append(idWeightSums, arrayI)
 	}
 	var randNumbers []int
@@ -352,17 +346,12 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 		randNumber := rand.Intn(weightCount)
 		randNumbers = append(randNumbers, randNumber)
 	}
-	fmt.Println(weightCount)
-	fmt.Println(idWeightSums)
-	fmt.Println(randNumbers)
-	// [{0 0} {1 10} {2 40} {3 100} {4 200}]
-	// [164 127 118 10 119 180 197 155 29 69]
-	type RandNumberCount struct {
-		ID    int
-		Count int
+	type CharacterCount struct {
+		CharacterID string
+		Count       int
 	}
-	var randNumberCount RandNumberCount
-	var randNumberCounts []RandNumberCount
+	var characterCount CharacterCount
+	var characterCounts []CharacterCount
 	for i := 0; i < len(idWeightSums)-1; i++ {
 		min := idWeightSums[i].WeightSum
 		max := idWeightSums[i+1].WeightSum
@@ -372,35 +361,28 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 				count += 1
 			}
 		}
-		randNumberCount = RandNumberCount{ID: idWeightSums[i+1].ID, Count: count}
-		randNumberCounts = append(randNumberCounts, randNumberCount)
+		characterCount = CharacterCount{CharacterID: idWeightSums[i+1].CharacterID, Count: count}
+		characterCounts = append(characterCounts, characterCount)
 	}
-	fmt.Println(randNumberCounts)
-	var idNumbers []int
-	for _, v := range randNumberCounts {
-		id := v.ID
+	var characterIdsDrawed []string
+	for _, v := range characterCounts {
+		id := v.CharacterID
 		n := v.Count
 		for i := 0; i < n; i++ {
-			idNumbers = append(idNumbers, id)
+			characterIdsDrawed = append(characterIdsDrawed, id)
 		}
 	}
-	fmt.Println(idNumbers)
-	shuffle(idNumbers)
-	fmt.Println(idNumbers)
-	var characterIdList []string
+	shuffle(characterIdsDrawed)
 	var characterInfo CharacterResponse
 	var results []CharacterResponse
-	for _, id := range idNumbers {
+	for _, character_id := range characterIdsDrawed {
 		var character Character
-		// SELECT * FROM `characters`  WHERE (id = 3)
-		db.Where("id = ?", id).Find(&character)
-		characterIdList = append(characterIdList, character.CharacterID)
-		characterInfo = CharacterResponse{CharacterID: character.CharacterID, Name: character.Name}
+		// SELECT * FROM `characters`  WHERE (character_id = 'c115174c-05ad-11ec-8679-a0c58933fdce')
+		db.Where("character_id = ?", character_id).Find(&character)
+		characterInfo = CharacterResponse{CharacterID: character_id, Name: character.Name}
 		results = append(results, characterInfo)
-	}
-	for _, v := range characterIdList {
-		userCharacterId := createId()
-		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, CharacterID: v}
+		userCharacterId := createUUId()
+		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, CharacterID: character_id}
 		/*
 			INSERT INTO `user_characters` (`user_character_id`,`user_id`,`character_id`)
 			VALUES ('02091c4d-1011-4615-8fbb-fd9e681153d4','703a0b0a-1541-487e-be5b-906e9541b021','c115174c-05ad-11ec-8679-a0c58933fdce')
@@ -432,7 +414,7 @@ func getCharacter() []Character {
 }
 
 // 引数の配列をシャッフルする
-func shuffle(data []int) {
+func shuffle(data []string) {
 	n := len(data)
 	for i := n - 1; i >= 0; i-- {
 		j := rand.Intn(i + 1)
@@ -441,7 +423,6 @@ func shuffle(data []int) {
 }
 
 // dbのcharactersテーブルに接続、character_idが引数character_idのデータを取得
-// SELECT * FROM `characters`  WHERE (id = 1)
 // 取得したデータのうち、名前データを返す
 func getCharacterName(character_id string) string {
 	db := GetConnection()
@@ -453,7 +434,6 @@ func getCharacterName(character_id string) string {
 }
 
 // dbのuser_charactersテーブルに接続、user_idが引数user_idのデータを取得
-// SELECT * FROM `user_characters`  WHERE (user_id = '1')
 func getUserCharacterList(user_id string) []UserCharacter {
 	db := GetConnection()
 	defer db.Close()
