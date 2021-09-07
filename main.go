@@ -12,7 +12,9 @@ import (
 	"github.com/dgrijalva/jwt-go"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
-	"github.com/jinzhu/gorm"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -61,11 +63,11 @@ func GetConnection() *gorm.DB {
 	if err != nil {
 		fmt.Println(err)
 	}
-	db, err := gorm.Open("mysql", string(userBytes)+":"+string(passwordBytes)+"@/game_user?charset=utf8&parseTime=True&loc=Local")
+	db, err := gorm.Open(mysql.Open(string(userBytes)+":"+string(passwordBytes)+"@/game_user?charset=utf8&parseTime=True&loc=Local"), &gorm.Config{})
 	if err != nil {
 		log.Printf("DB connection failed %v", err)
 	}
-	db.LogMode(true)
+	db.Logger = db.Logger.LogMode(logger.Info)
 	return db
 }
 
@@ -74,7 +76,6 @@ type UserName struct {
 }
 
 type User struct {
-	// ID     int    `json:"id"`
 	UserID string `json:"user_id"`
 	Name   string `json:"name"`
 }
@@ -84,7 +85,7 @@ type TokenResponse struct {
 }
 
 // localhost:8080/user/createでユーザ情報を作成
-// -d {"name":"x"}で名前情報を受け取る
+// -d {"name":"aaa"}で名前情報を受け取る
 // UUIDでユーザIDを生成する
 // ユーザIDからjwtでトークンを作成し、トークンを返す
 func createUser(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +95,7 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 		RespondWithError(w, http.StatusBadRequest, "Invalid request")
 		return
 	}
-	// string(body) = {"name": "x"}
+	// string(body) = {"name": "aaa"}
 	var userName UserName
 	if err := json.Unmarshal(body, &userName); err != nil {
 		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
@@ -103,11 +104,15 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 	userId := createUUId()
 	user := User{UserID: userId, Name: userName.Name}
 	db := GetConnection()
-	defer db.Close()
-	// INSERT INTO `users` (`user_id`,`name`) VALUES ('bdd4056a-f113-424c-9951-1eaaaf853e5c','Tamachan')
+	db_sql, err := db.DB()
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer db_sql.Close()
+	// INSERT INTO `users` (`user_id`,`name`) VALUES ('bdd4056a-f113-424c-9951-1eaaaf853e5c','aaa')
 	db.Create(&user)
 	// ユーザIDの文字列からjwtでトークン作成
-	token, err := CreateToken(userId)
+	token, err := createToken(userId)
 	if err != nil {
 		ErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
@@ -122,7 +127,7 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 // ユーザIDからjwtでトークンを作成
 // 有効期限は24時間に設定
 // jwtのペイロードにはユーザIDと有効期限の時刻を設定
-func CreateToken(userID string) (string, error) {
+func createToken(userID string) (string, error) {
 	// HS256は256ビットのハッシュ値を生成するアルゴリズム
 	token := jwt.New(jwt.GetSigningMethod("HS256"))
 	// ペイロードにユーザIDと有効期限の時刻(24時間後)を設定
@@ -194,19 +199,23 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db := GetConnection()
-	defer db.Close()
+	db_sql, err := db.DB()
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer db_sql.Close()
 	var user User
 	// SELECT * FROM `users`  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
 	db.Where("user_id = ?", userId).Find(&user)
 	Success(w, http.StatusOK, &UserResponse{
 		Name: user.Name,
 	})
-	// {"name":"x"}が返る
+	// {"name":"aaa"}が返る
 	// 有効期限が切れると{"code":400,"message":"Token is expired"}が返る
 }
 
 // jwtトークンを認証する
-func VerifyToken(tokenString string) (*jwt.Token, error) {
+func verifyToken(tokenString string) (*jwt.Token, error) {
 	// 秘密鍵を取得
 	signBytes, err := ioutil.ReadFile("../.ssh/id_rsa")
 	if err != nil {
@@ -225,7 +234,7 @@ func VerifyToken(tokenString string) (*jwt.Token, error) {
 // トークンから名前情報を取り出し、返す
 func getUserId(w http.ResponseWriter, r *http.Request) string {
 	tokenString := r.Header.Get("x-token")
-	token, err := VerifyToken(tokenString)
+	token, err := verifyToken(tokenString)
 	if err != nil {
 		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return ""
@@ -237,7 +246,7 @@ func getUserId(w http.ResponseWriter, r *http.Request) string {
 }
 
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
-// -d {"name":"z"}で更新する名前情報を受け取る
+// -d {"name":"bbb"}で更新する名前情報を受け取る
 // トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を更新
 func updateUser(w http.ResponseWriter, r *http.Request) {
 	userId := getUserId(w, r)
@@ -250,7 +259,7 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		RespondWithError(w, http.StatusBadRequest, "Invalid request")
 		return
 	}
-	// string(body) = {"name": "z"}
+	// string(body) = {"name": "bbb"}
 	var userName UserName
 	if err := json.Unmarshal(body, &userName); err != nil {
 		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
@@ -258,9 +267,13 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	var user User
 	db := GetConnection()
-	defer db.Close()
+	db_sql, err := db.DB()
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer db_sql.Close()
 	// dbでnameを更新
-	// UPDATE `users` SET `name` = 'Hamachan'  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
+	// UPDATE `users` SET `name` = 'bbb'  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
 	db.Model(&user).Where("user_id = ?", userId).Update("name", userName.Name)
 	Success(w, http.StatusOK, nil)
 }
@@ -322,8 +335,12 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db := GetConnection()
-	defer db.Close()
-	characters := getCharacter()
+	db_sql, err := db.DB()
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer db_sql.Close()
+	charactersList := getCharacters()
 	type IDWeightSum struct {
 		CharacterID string
 		WeightSum   int
@@ -331,11 +348,11 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 	var idWeightSums []IDWeightSum
 	arrayZero := IDWeightSum{CharacterID: "", WeightSum: 0}
 	idWeightSums = append(idWeightSums, arrayZero)
-	charactersCount := len(characters)
+	charactersCount := len(charactersList)
 	var weightCount int
 	for i := 0; i < charactersCount; i++ {
-		characterId := characters[i].CharacterID
-		w := characters[i].Weight
+		characterId := charactersList[i].CharacterID
+		w := charactersList[i].Weight
 		weightCount += w
 		arrayI := IDWeightSum{CharacterID: characterId, WeightSum: weightCount}
 		idWeightSums = append(idWeightSums, arrayI)
@@ -375,19 +392,34 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 	shuffle(characterIdsDrawed)
 	var characterInfo CharacterResponse
 	var results []CharacterResponse
+	var userCharacters []UserCharacter
+	count := 0
 	for _, character_id := range characterIdsDrawed {
-		var character Character
-		// SELECT * FROM `characters`  WHERE (character_id = 'c115174c-05ad-11ec-8679-a0c58933fdce')
-		db.Where("character_id = ?", character_id).Find(&character)
+		character := getCharacterInfo(charactersList, character_id)
 		characterInfo = CharacterResponse{CharacterID: character_id, Name: character.Name}
 		results = append(results, characterInfo)
 		userCharacterId := createUUId()
 		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, CharacterID: character_id}
+		userCharacters = append(userCharacters, userCharacter)
+		count += 1
+		if count == 10000 {
+			/*
+				INSERT INTO `user_characters` (`user_character_id`,`user_id`,`character_id`)
+				VALUES ('eaaada0c-3815-4da2-b791-3447a816a3e0','c2f0d74b-0321-4f87-930f-8d85350ee6d4','7b6a8a4e-0ed8-11ec-93f3-a0c58933fdce')
+				, ... ,
+				('ff1583af-3f60-43de-839c-68094286e11a','c2f0d74b-0321-4f87-930f-8d85350ee6d4','7b6d0b6d-0ed8-11ec-93f3-a0c58933fdce')
+			*/
+			db.Create(&userCharacters)
+			userCharacters = userCharacters[:0]
+			count = 0
+		}
+	}
+	if len(userCharacters) != 0 {
 		/*
 			INSERT INTO `user_characters` (`user_character_id`,`user_id`,`character_id`)
-			VALUES ('02091c4d-1011-4615-8fbb-fd9e681153d4','703a0b0a-1541-487e-be5b-906e9541b021','c115174c-05ad-11ec-8679-a0c58933fdce')
+			VALUES ('98b27372-8806-4d33-950a-68625ed6d687','c2f0d74b-0321-4f87-930f-8d85350ee6d4','7b6c0f26-0ed8-11ec-93f3-a0c58933fdce')
 		*/
-		db.Create(&userCharacter)
+		db.Create(&userCharacters)
 	}
 	Success(w, http.StatusOK, &ResultResponse{
 		Results: results,
@@ -404,13 +436,17 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 }
 
 // dbからcharactersテーブルの情報を取得
-func getCharacter() []Character {
+func getCharacters() []Character {
 	db := GetConnection()
-	defer db.Close()
-	var character []Character
+	db_sql, err := db.DB()
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer db_sql.Close()
+	var charactersList []Character
 	// SELECT * FROM `characters`
-	db.Find(&character)
-	return character
+	db.Find(&charactersList)
+	return charactersList
 }
 
 // 引数の配列をシャッフルする
@@ -422,25 +458,28 @@ func shuffle(data []string) {
 	}
 }
 
-// dbのcharactersテーブルに接続、character_idが引数character_idのデータを取得
-// 取得したデータのうち、名前データを返す
-func getCharacterName(character_id string) string {
-	db := GetConnection()
-	defer db.Close()
-	var character Character
-	// SELECT * FROM `characters`  WHERE (character_id = 'c115174c-05ad-11ec-8679-a0c58933fdce')
-	db.Where("character_id = ?", character_id).Find(&character)
-	return character.Name
+// 引数のcharactersListからCharacterIDが引数character_idのデータを取得
+func getCharacterInfo(charactersList []Character, character_id string) Character {
+	for i := 0; i < len(charactersList); i++ {
+		if charactersList[i].CharacterID == character_id {
+			return charactersList[i]
+		}
+	}
+	return Character{}
 }
 
-// dbのuser_charactersテーブルに接続、user_idが引数user_idのデータを取得
-func getUserCharacterList(user_id string) []UserCharacter {
+// dbのuser_charactersテーブルからuser_idが引数user_idのデータを取得
+func getUserCharacters(user_id string) []UserCharacter {
 	db := GetConnection()
-	defer db.Close()
-	var userCharacterList []UserCharacter
+	db_sql, err := db.DB()
+	if err != nil {
+		fmt.Println(err)
+	}
+	defer db_sql.Close()
+	var userCharactersList []UserCharacter
 	// SELECT * FROM `user_characters`  WHERE (user_id = '703a0b0a-1541-487e-be5b-906e9541b021')
-	db.Where("user_id = ?", user_id).Find(&userCharacterList)
-	return userCharacterList
+	db.Where("user_id = ?", user_id).Find(&userCharactersList)
+	return userCharactersList
 }
 
 // localhost:8080/character/listでユーザが所持しているキャラクター一覧情報を取得
@@ -450,14 +489,20 @@ func getCharacterList(w http.ResponseWriter, r *http.Request) {
 	if userId == "" {
 		return
 	}
-	userCharacterList := getUserCharacterList(userId)
+	charactersList := getCharacters()
+	userCharactersList := getUserCharacters(userId)
 	var characters []UserCharacterResponse
 	var userCharacterInfo UserCharacterResponse
-	for _, v := range userCharacterList {
-		character_id := v.CharacterID
-		characterName := getCharacterName(character_id)
-		userCharacterInfo = UserCharacterResponse{UserCharacterID: v.UserCharacterID, CharacterID: character_id, Name: characterName}
-		characters = append(characters, userCharacterInfo)
+	if len(userCharactersList) == 0 {
+		characters = make([]UserCharacterResponse, 0)
+	} else {
+		for _, v := range userCharactersList {
+			character_id := v.CharacterID
+			character := getCharacterInfo(charactersList, character_id)
+			characterName := character.Name
+			userCharacterInfo = UserCharacterResponse{UserCharacterID: v.UserCharacterID, CharacterID: character_id, Name: characterName}
+			characters = append(characters, userCharacterInfo)
+		}
 	}
 	Success(w, http.StatusOK, &CharactersResponse{
 		Characters: characters,
