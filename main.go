@@ -45,38 +45,49 @@ func home(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello World")
 }
 
-// Error情報をJsonで返す
-func RespondWithError(w http.ResponseWriter, code int, msg string) {
-	RespondWithJSON(w, code, map[string]string{"error": msg})
+func Success(w http.ResponseWriter, code int, data interface{}) {
+	jsonData, _ := json.Marshal(data)
+	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(jsonData)
 }
 
-func RespondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-	response, _ := json.Marshal(payload)
-	w.Header().Set("Content-Type", "application/json")
+// Errorメッセージが入る
+type Response struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// Errorメッセージを返す
+func ErrorResponse(w http.ResponseWriter, code int, message string) {
+	jsonData, err := json.Marshal(&Response{
+		Code:    code,
+		Message: message,
+	})
+	if err != nil {
+		log.Println("json marshal error")
+	}
 	w.WriteHeader(code)
-	w.Write(response)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(jsonData)
 }
 
 // DataBase(game_user)からコネクション取得
-func GetConnection() *gorm.DB {
+func GetConnection() (*gorm.DB, error) {
 	passwordBytes, err := ioutil.ReadFile("../.ssh/mysql_password")
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	userBytes, err := ioutil.ReadFile("../.ssh/mysql_user")
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	db, err := gorm.Open(mysql.Open(string(userBytes)+":"+string(passwordBytes)+"@/game_user?charset=utf8&parseTime=True&loc=Local"), &gorm.Config{})
 	if err != nil {
-		log.Printf("DB connection failed %v", err)
+		return nil, err
 	}
 	db.Logger = db.Logger.LogMode(logger.Info)
-	return db
-}
-
-type UserName struct {
-	Name string `json:"name"`
+	return db, nil
 }
 
 type User struct {
@@ -96,24 +107,36 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		RespondWithError(w, http.StatusBadRequest, "Invalid request")
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// string(body) = {"name": "aaa"}
-	var userName UserName
-	if err := json.Unmarshal(body, &userName); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
+
+	var user User
+	if err := json.Unmarshal(body, &user); err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	userId := createUUId()
-	user := User{UserID: userId, Name: userName.Name}
-	db := GetConnection()
+	userId, err := createUUId()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	user.UserID = userId
+
+	db, err := GetConnection()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	defer db_sql.Close()
-	// INSERT INTO `users` (`user_id`,`name`) VALUES ('bdd4056a-f113-424c-9951-1eaaaf853e5c','aaa')
+	/*
+		INSERT INTO `users` (`user_id`,`name`) VALUES ('95daec2b-287c-4358-ba6f-5c29e1c3cbdf','aaa')
+	*/
 	db.Create(&user)
 	// ユーザIDの文字列からjwtでトークン作成
 	token, err := createToken(userId)
@@ -142,7 +165,7 @@ func createToken(userID string) (string, error) {
 	// 秘密鍵を取得
 	signBytes, err := ioutil.ReadFile("../.ssh/id_rsa")
 	if err != nil {
-		fmt.Println(err)
+		return "", err
 	}
 	// 秘密鍵で署名
 	tokenString, err := token.SignedString(signBytes)
@@ -153,41 +176,13 @@ func createToken(userID string) (string, error) {
 }
 
 // UUIDでユーザIDを生成
-func createUUId() string {
+func createUUId() (string, error) {
 	u, err := uuid.NewRandom()
 	if err != nil {
-		fmt.Println(err)
-		return ""
+		return "", err
 	}
 	uu := u.String()
-	return uu
-}
-
-func Success(w http.ResponseWriter, code int, data interface{}) {
-	jsonData, _ := json.Marshal(data)
-	w.Header().Add("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(jsonData)
-}
-
-// Errorメッセージが入る
-type Response struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// Errorメッセージを返す
-func ErrorResponse(w http.ResponseWriter, code int, message string) {
-	jsonData, err := json.Marshal(&Response{
-		Code:    code,
-		Message: message,
-	})
-	if err != nil {
-		log.Println("json marshal error")
-	}
-	w.WriteHeader(code)
-	w.Header().Add("Content-Type", "application/json")
-	w.Write(jsonData)
+	return uu, nil
 }
 
 // getUser関数で返されるユーザの名前情報が入る
@@ -198,19 +193,27 @@ type UserResponse struct {
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
 // トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を取り出し、返す
 func getUser(w http.ResponseWriter, r *http.Request) {
-	userId := getUserId(w, r)
-	if userId == "" {
+	userId, err := getUserId(w, r)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	db := GetConnection()
+
+	db, err := GetConnection()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	defer db_sql.Close()
 	var user User
-	// SELECT * FROM `users`  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
+	// SELECT * FROM `users` WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
 	db.Where("user_id = ?", userId).Find(&user)
+
 	Success(w, http.StatusOK, &UserResponse{
 		Name: user.Name,
 	})
@@ -223,7 +226,7 @@ func verifyToken(tokenString string) (*jwt.Token, error) {
 	// 秘密鍵を取得
 	signBytes, err := ioutil.ReadFile("../.ssh/id_rsa")
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return signBytes, nil
@@ -236,58 +239,61 @@ func verifyToken(tokenString string) (*jwt.Token, error) {
 
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
 // トークンから名前情報を取り出し、返す
-func getUserId(w http.ResponseWriter, r *http.Request) string {
+func getUserId(w http.ResponseWriter, r *http.Request) (string, error) {
 	tokenString := r.Header.Get("x-token")
 	token, err := verifyToken(tokenString)
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
-		return ""
+		return "", err
 	}
 	claims := token.Claims.(jwt.MapClaims)
 	// claims = map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
 	userId := claims["userId"].(string)
-	return userId
+	return userId, nil
 }
 
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
 // -d {"name":"bbb"}で更新する名前情報を受け取る
 // トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を更新
 func updateUser(w http.ResponseWriter, r *http.Request) {
-	userId := getUserId(w, r)
-	if userId == "" {
+	userId, err := getUserId(w, r)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		RespondWithError(w, http.StatusBadRequest, "Invalid request")
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// string(body) = {"name": "bbb"}
-	var userName UserName
-	if err := json.Unmarshal(body, &userName); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
-		return
-	}
+
 	var user User
-	db := GetConnection()
+	if err := json.Unmarshal(body, &user); err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	db, err := GetConnection()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	defer db_sql.Close()
 	// dbでnameを更新
-	// UPDATE `users` SET `name` = 'bbb'  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
-	db.Model(&user).Where("user_id = ?", userId).Update("name", userName.Name)
+	// UPDATE `users` SET `name`='bbb' WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
+	db.Model(&user).Where("user_id = ?", userId).Update("name", user.Name)
 	Success(w, http.StatusOK, nil)
 }
 
-type Times struct {
-	Times int `json:"times"`
-}
-
-type GachaID struct {
+type Drawing struct {
 	GachaID int `json:"gacha_id"`
+	Times   int `json:"times"`
 }
 
 type Character struct {
@@ -325,11 +331,14 @@ type CharactersResponse struct {
 
 // dbのgacha_charactersテーブルからgacha_id一覧を取得
 // 引数のgachaIdがその中に含まれていたらtrue、含まれていなかったらfalseを返す
-func gachaIdContains(gachaId int) bool {
-	db := GetConnection()
+func gachaIdContains(gachaId int) (bool, error) {
+	db, err := GetConnection()
+	if err != nil {
+		return false, err
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		return false, err
 	}
 	defer db_sql.Close()
 	var gachaIds []int
@@ -337,52 +346,65 @@ func gachaIdContains(gachaId int) bool {
 	db.Table("gacha_characters").Select("gacha_id").Scan(&gachaIds)
 	for _, v := range gachaIds {
 		if v == gachaId {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // localhost:8080/gacha/drawでガチャを引いて、キャラクターを取得
 // -H "x-token:yyy"でトークン情報を受け取り、認証
 // -d {"gacha_id":n, "times":x}でどのガチャを引くか、ガチャを何回引くかの情報を受け取る
 func drawGacha(w http.ResponseWriter, r *http.Request) {
-	userId := getUserId(w, r)
-	if userId == "" {
+	userId, err := getUserId(w, r)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		RespondWithError(w, http.StatusBadRequest, "Invalid request")
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var gachaId GachaID
-	if err := json.Unmarshal(body, &gachaId); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
+
+	var drawing Drawing
+	if err := json.Unmarshal(body, &drawing); err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !gachaIdContains(gachaId.GachaID) {
-		RespondWithError(w, http.StatusBadRequest, "gacha_id is error.")
+	contains, err := gachaIdContains(drawing.GachaID)
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var times Times
-	if err := json.Unmarshal(body, &times); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
+	if !contains {
+		ErrorResponse(w, http.StatusBadRequest, "gacha_id is error.")
 		return
 	}
-	if times.Times <= 0 {
-		RespondWithError(w, http.StatusBadRequest, "times is error.")
+	if drawing.Times <= 0 {
+		ErrorResponse(w, http.StatusBadRequest, "times is error.")
 		return
 	}
-	db := GetConnection()
+
+	db, err := GetConnection()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	defer db_sql.Close()
-	charactersList := getCharacters(gachaId.GachaID)
-	gachaCharacterIdsDrawed := drawGachaCharacterIds(charactersList, times.Times)
+	charactersList, err := getCharacters(drawing.GachaID)
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	gachaCharacterIdsDrawed := drawGachaCharacterIds(charactersList, drawing.Times)
 	var characterInfo CharacterResponse
 	var results []CharacterResponse
 	var userCharacters []UserCharacter
@@ -391,7 +413,11 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 		character := getCharacterInfo(charactersList, gacha_character_id)
 		characterInfo = CharacterResponse{CharacterID: gacha_character_id, Name: character.CharacterName}
 		results = append(results, characterInfo)
-		userCharacterId := createUUId()
+		userCharacterId, err := createUUId()
+		if err != nil {
+			ErrorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, GachaCharacterID: gacha_character_id}
 		userCharacters = append(userCharacters, userCharacter)
 		count += 1
@@ -448,11 +474,14 @@ func drawGachaCharacterIds(charactersList []Character, times int) []string {
 
 // dbからキャラクターのgacha_character_id、名前、weightの情報を取得
 // ガチャidが引数gacha_idのキャラクターに限る
-func getCharacters(gacha_id int) []Character {
-	db := GetConnection()
+func getCharacters(gacha_id int) ([]Character, error) {
+	db, err := GetConnection()
+	if err != nil {
+		return nil, err
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	defer db_sql.Close()
 	var charactersList []Character
@@ -469,15 +498,18 @@ func getCharacters(gacha_id int) []Character {
 		Joins("join characters on gacha_characters.character_id = characters.id").
 		Joins("join rarities on gacha_characters.rarity_id = rarities.id").
 		Where("gacha_id = ?", gacha_id).Scan(&charactersList)
-	return charactersList
+	return charactersList, nil
 }
 
 // dbから全てのキャラクターのgacha_character_id、名前、weightの情報を取得
-func getAllCharacters() []Character {
-	db := GetConnection()
+func getAllCharacters() ([]Character, error) {
+	db, err := GetConnection()
+	if err != nil {
+		return nil, err
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	defer db_sql.Close()
 	var charactersList []Character
@@ -493,7 +525,7 @@ func getAllCharacters() []Character {
 		Joins("join characters on gacha_characters.character_id = characters.id").
 		Joins("join rarities on gacha_characters.rarity_id = rarities.id").
 		Scan(&charactersList)
-	return charactersList
+	return charactersList, nil
 }
 
 // 引数のcharactersListからGachaCharacterIDが引数gacha_character_idのデータを取得
@@ -507,28 +539,41 @@ func getCharacterInfo(charactersList []Character, gacha_character_id string) Cha
 }
 
 // dbのuser_charactersテーブルからuser_idが引数user_idのデータを取得
-func getUserCharacters(user_id string) []UserCharacter {
-	db := GetConnection()
+func getUserCharacters(user_id string) ([]UserCharacter, error) {
+	db, err := GetConnection()
+	if err != nil {
+		return nil, err
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	defer db_sql.Close()
 	var userCharactersList []UserCharacter
 	// SELECT * FROM `user_characters`  WHERE (user_id = '703a0b0a-1541-487e-be5b-906e9541b021')
 	db.Where("user_id = ?", user_id).Find(&userCharactersList)
-	return userCharactersList
+	return userCharactersList, nil
 }
 
 // localhost:8080/character/listでユーザが所持しているキャラクター一覧情報を取得
 // -H "x-token:yyy"でトークン情報を受け取り、認証
 func getCharacterList(w http.ResponseWriter, r *http.Request) {
-	userId := getUserId(w, r)
-	if userId == "" {
+	userId, err := getUserId(w, r)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	allCharactersList := getAllCharacters()
-	userCharactersList := getUserCharacters(userId)
+
+	allCharactersList, err := getAllCharacters()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	userCharactersList, err := getUserCharacters(userId)
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	var characters []UserCharacterResponse
 	var userCharacterInfo UserCharacterResponse
 	if len(userCharactersList) == 0 {
