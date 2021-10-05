@@ -5,7 +5,8 @@ USE `game_user`;
 DROP TABLE IF EXISTS `game_user`.`users`;
 CREATE TABLE IF NOT EXISTS `game_user`.`users`(
   `user_id` CHAR(36) PRIMARY KEY NOT NULL,
-  `name` VARCHAR(32) NOT NULL
+  `name` VARCHAR(32) NOT NULL,
+  `address` VARCHAR(64) NOT NULL
 );
 
 DROP TABLE IF EXISTS `game_user`.`rarities`;
