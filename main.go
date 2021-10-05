@@ -1,10 +1,13 @@
 package main
 
 import (
+	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math"
+	"math/big"
 	"math/rand"
 	"net/http"
 	"time"
@@ -42,38 +45,49 @@ func home(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello World")
 }
 
-// Error情報をJsonで返す
-func RespondWithError(w http.ResponseWriter, code int, msg string) {
-	RespondWithJSON(w, code, map[string]string{"error": msg})
+func Success(w http.ResponseWriter, code int, data interface{}) {
+	jsonData, _ := json.Marshal(data)
+	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(code)
+	w.Write(jsonData)
 }
 
-func RespondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-	response, _ := json.Marshal(payload)
-	w.Header().Set("Content-Type", "application/json")
+// Errorメッセージが入る
+type Response struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// Errorメッセージを返す
+func ErrorResponse(w http.ResponseWriter, code int, message string) {
+	jsonData, err := json.Marshal(&Response{
+		Code:    code,
+		Message: message,
+	})
+	if err != nil {
+		log.Println("json marshal error")
+	}
 	w.WriteHeader(code)
-	w.Write(response)
+	w.Header().Add("Content-Type", "application/json")
+	w.Write(jsonData)
 }
 
 // DataBase(game_user)からコネクション取得
-func GetConnection() *gorm.DB {
+func GetConnection() (*gorm.DB, error) {
 	passwordBytes, err := ioutil.ReadFile("../.ssh/mysql_password")
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	userBytes, err := ioutil.ReadFile("../.ssh/mysql_user")
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	db, err := gorm.Open(mysql.Open(string(userBytes)+":"+string(passwordBytes)+"@/game_user?charset=utf8&parseTime=True&loc=Local"), &gorm.Config{})
 	if err != nil {
-		log.Printf("DB connection failed %v", err)
+		return nil, err
 	}
 	db.Logger = db.Logger.LogMode(logger.Info)
-	return db
-}
-
-type UserName struct {
-	Name string `json:"name"`
+	return db, nil
 }
 
 type User struct {
@@ -93,24 +107,36 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		RespondWithError(w, http.StatusBadRequest, "Invalid request")
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// string(body) = {"name": "aaa"}
-	var userName UserName
-	if err := json.Unmarshal(body, &userName); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
+
+	var user User
+	if err := json.Unmarshal(body, &user); err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	userId := createUUId()
-	user := User{UserID: userId, Name: userName.Name}
-	db := GetConnection()
+	userId, err := createUUId()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	user.UserID = userId
+
+	db, err := GetConnection()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	defer db_sql.Close()
-	// INSERT INTO `users` (`user_id`,`name`) VALUES ('bdd4056a-f113-424c-9951-1eaaaf853e5c','aaa')
+	/*
+		INSERT INTO `users` (`user_id`,`name`) VALUES ('95daec2b-287c-4358-ba6f-5c29e1c3cbdf','aaa')
+	*/
 	db.Create(&user)
 	// ユーザIDの文字列からjwtでトークン作成
 	token, err := createToken(userId)
@@ -139,7 +165,7 @@ func createToken(userID string) (string, error) {
 	// 秘密鍵を取得
 	signBytes, err := ioutil.ReadFile("../.ssh/id_rsa")
 	if err != nil {
-		fmt.Println(err)
+		return "", err
 	}
 	// 秘密鍵で署名
 	tokenString, err := token.SignedString(signBytes)
@@ -150,41 +176,13 @@ func createToken(userID string) (string, error) {
 }
 
 // UUIDでユーザIDを生成
-func createUUId() string {
+func createUUId() (string, error) {
 	u, err := uuid.NewRandom()
 	if err != nil {
-		fmt.Println(err)
-		return ""
+		return "", err
 	}
 	uu := u.String()
-	return uu
-}
-
-func Success(w http.ResponseWriter, code int, data interface{}) {
-	jsonData, _ := json.Marshal(data)
-	w.Header().Add("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(jsonData)
-}
-
-// Errorメッセージが入る
-type Response struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// Errorメッセージを返す
-func ErrorResponse(w http.ResponseWriter, code int, message string) {
-	jsonData, err := json.Marshal(&Response{
-		Code:    code,
-		Message: message,
-	})
-	if err != nil {
-		log.Println("json marshal error")
-	}
-	w.WriteHeader(code)
-	w.Header().Add("Content-Type", "application/json")
-	w.Write(jsonData)
+	return uu, nil
 }
 
 // getUser関数で返されるユーザの名前情報が入る
@@ -195,19 +193,27 @@ type UserResponse struct {
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
 // トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を取り出し、返す
 func getUser(w http.ResponseWriter, r *http.Request) {
-	userId := getUserId(w, r)
-	if userId == "" {
+	userId, err := getUserId(w, r)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	db := GetConnection()
+
+	db, err := GetConnection()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	defer db_sql.Close()
 	var user User
-	// SELECT * FROM `users`  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
+	// SELECT * FROM `users` WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
 	db.Where("user_id = ?", userId).Find(&user)
+
 	Success(w, http.StatusOK, &UserResponse{
 		Name: user.Name,
 	})
@@ -220,7 +226,7 @@ func verifyToken(tokenString string) (*jwt.Token, error) {
 	// 秘密鍵を取得
 	signBytes, err := ioutil.ReadFile("../.ssh/id_rsa")
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		return signBytes, nil
@@ -233,70 +239,73 @@ func verifyToken(tokenString string) (*jwt.Token, error) {
 
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
 // トークンから名前情報を取り出し、返す
-func getUserId(w http.ResponseWriter, r *http.Request) string {
+func getUserId(w http.ResponseWriter, r *http.Request) (string, error) {
 	tokenString := r.Header.Get("x-token")
 	token, err := verifyToken(tokenString)
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
-		return ""
+		return "", err
 	}
 	claims := token.Claims.(jwt.MapClaims)
 	// claims = map[exp:1.629639808e+09 userId:bdd4056a-f113-424c-9951-1eaaaf853e5c]
 	userId := claims["userId"].(string)
-	return userId
+	return userId, nil
 }
 
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
 // -d {"name":"bbb"}で更新する名前情報を受け取る
 // トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前情報を更新
 func updateUser(w http.ResponseWriter, r *http.Request) {
-	userId := getUserId(w, r)
-	if userId == "" {
+	userId, err := getUserId(w, r)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		RespondWithError(w, http.StatusBadRequest, "Invalid request")
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// string(body) = {"name": "bbb"}
-	var userName UserName
-	if err := json.Unmarshal(body, &userName); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
-		return
-	}
+
 	var user User
-	db := GetConnection()
+	if err := json.Unmarshal(body, &user); err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	db, err := GetConnection()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	defer db_sql.Close()
 	// dbでnameを更新
-	// UPDATE `users` SET `name` = 'bbb'  WHERE (user_id = 'bdd4056a-f113-424c-9951-1eaaaf853e5c')
-	db.Model(&user).Where("user_id = ?", userId).Update("name", userName.Name)
+	// UPDATE `users` SET `name`='bbb' WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
+	db.Model(&user).Where("user_id = ?", userId).Update("name", user.Name)
 	Success(w, http.StatusOK, nil)
 }
 
-type Times struct {
-	Times int `json:"times"`
-}
-
-type GachaID struct {
+type Drawing struct {
 	GachaID int `json:"gacha_id"`
+	Times   int `json:"times"`
 }
 
 type Character struct {
-	CharacterID   string `json:"character_id"`
-	CharacterName string `json:"character_name"`
-	Weight        uint   `json:"weight"`
+	GachaCharacterID string `json:"gacha_character_id"`
+	CharacterName    string `json:"character_name"`
+	Weight           uint   `json:"weight"`
 }
 
 type UserCharacter struct {
-	UserCharacterID string `json:"user_character_id"`
-	UserID          string `json:"user_id"`
-	CharacterID     string `json:"character_id"`
+	UserCharacterID  string `json:"user_character_id"`
+	UserID           string `json:"user_id"`
+	GachaCharacterID string `json:"gacha_character_id"`
 }
 
 type CharacterResponse struct {
@@ -320,53 +329,101 @@ type CharactersResponse struct {
 	Characters []UserCharacterResponse `json:"characters"`
 }
 
+// dbのgacha_charactersテーブルからgacha_id一覧を取得
+// 引数のgachaIdがその中に含まれていたらtrue、含まれていなかったらfalseを返す
+func gachaIdContains(gachaId int) (bool, error) {
+	db, err := GetConnection()
+	if err != nil {
+		return false, err
+	}
+	db_sql, err := db.DB()
+	if err != nil {
+		return false, err
+	}
+	defer db_sql.Close()
+	var gachaIds []int
+	// SELECT gacha_id FROM `gacha_characters`
+	db.Table("gacha_characters").Select("gacha_id").Scan(&gachaIds)
+	for _, v := range gachaIds {
+		if v == gachaId {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // localhost:8080/gacha/drawでガチャを引いて、キャラクターを取得
 // -H "x-token:yyy"でトークン情報を受け取り、認証
 // -d {"gacha_id":n, "times":x}でどのガチャを引くか、ガチャを何回引くかの情報を受け取る
 func drawGacha(w http.ResponseWriter, r *http.Request) {
-	userId := getUserId(w, r)
-	if userId == "" {
+	userId, err := getUserId(w, r)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		RespondWithError(w, http.StatusBadRequest, "Invalid request")
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var gachaId GachaID
-	if err := json.Unmarshal(body, &gachaId); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
+
+	var drawing Drawing
+	if err := json.Unmarshal(body, &drawing); err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	var times Times
-	if err := json.Unmarshal(body, &times); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "JSON Unmarshaling failed .")
+	contains, err := gachaIdContains(drawing.GachaID)
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	db := GetConnection()
+	if !contains {
+		ErrorResponse(w, http.StatusBadRequest, "gacha_id is error.")
+		return
+	}
+	if drawing.Times <= 0 {
+		ErrorResponse(w, http.StatusBadRequest, "times is error.")
+		return
+	}
+
+	db, err := GetConnection()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	defer db_sql.Close()
-	charactersList := getCharacters(gachaId.GachaID)
-	characterIdsDrawed := drawCharacterIds(charactersList, times.Times)
+	charactersList, err := getCharacters(drawing.GachaID)
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	gachaCharacterIdsDrawed := drawGachaCharacterIds(charactersList, drawing.Times)
 	var characterInfo CharacterResponse
 	var results []CharacterResponse
 	var userCharacters []UserCharacter
 	count := 0
-	for _, character_id := range characterIdsDrawed {
-		character := getCharacterInfo(charactersList, character_id)
-		characterInfo = CharacterResponse{CharacterID: character_id, Name: character.CharacterName}
+	for _, gacha_character_id := range gachaCharacterIdsDrawed {
+		character := getCharacterInfo(charactersList, gacha_character_id)
+		characterInfo = CharacterResponse{CharacterID: gacha_character_id, Name: character.CharacterName}
 		results = append(results, characterInfo)
-		userCharacterId := createUUId()
-		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, CharacterID: character_id}
+		userCharacterId, err := createUUId()
+		if err != nil {
+			ErrorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, GachaCharacterID: gacha_character_id}
 		userCharacters = append(userCharacters, userCharacter)
 		count += 1
 		if count == 10000 {
 			/*
-				INSERT INTO `user_characters` (`user_character_id`,`user_id`,`character_id`)
+				INSERT INTO `user_characters` (`user_character_id`,`user_id`,`gacha_character_id`)
 				VALUES ('eaaada0c-3815-4da2-b791-3447a816a3e0','c2f0d74b-0321-4f87-930f-8d85350ee6d4','7b6a8a4e-0ed8-11ec-93f3-a0c58933fdce')
 				, ... ,
 				('ff1583af-3f60-43de-839c-68094286e11a','c2f0d74b-0321-4f87-930f-8d85350ee6d4','7b6d0b6d-0ed8-11ec-93f3-a0c58933fdce')
@@ -378,7 +435,7 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(userCharacters) != 0 {
 		/*
-			INSERT INTO `user_characters` (`user_character_id`,`user_id`,`character_id`)
+			INSERT INTO `user_characters` (`user_character_id`,`user_id`,`gacha_character_id`)
 			VALUES ('98b27372-8806-4d33-950a-68625ed6d687','c2f0d74b-0321-4f87-930f-8d85350ee6d4','7b6c0f26-0ed8-11ec-93f3-a0c58933fdce')
 		*/
 		db.Create(&userCharacters)
@@ -397,66 +454,84 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 	*/
 }
 
-// charactersListからキャラクターのidとweightを取り出しchoicesに格納
+// charactersListからキャラクターのgacha_character_idとweightを取り出しchoicesに格納
 // times回分だけchoicesからWeighted Random Selectionを実行
-func drawCharacterIds(charactersList []Character, times int) []string {
+func drawGachaCharacterIds(charactersList []Character, times int) []string {
 	var choices []wr.Choice
 	for i := 0; i < len(charactersList); i++ {
-		choices = append(choices, wr.Choice{Item: charactersList[i].CharacterID, Weight: charactersList[i].Weight})
+		choices = append(choices, wr.Choice{Item: charactersList[i].GachaCharacterID, Weight: charactersList[i].Weight})
 	}
-	rand.Seed(time.Now().UTC().UnixNano())
-	var characterIdsDrawed []string
+	seed, _ := crand.Int(crand.Reader, big.NewInt(math.MaxInt64))
+	rand.Seed(seed.Int64())
+	//rand.Seed(time.Now().UTC().UnixNano())
+	var gachaCharacterIdsDrawed []string
 	for i := 0; i < times; i++ {
 		chooser, _ := wr.NewChooser(choices...)
-		characterIdsDrawed = append(characterIdsDrawed, chooser.Pick().(string))
+		gachaCharacterIdsDrawed = append(gachaCharacterIdsDrawed, chooser.Pick().(string))
 	}
-	return characterIdsDrawed
+	return gachaCharacterIdsDrawed
 }
 
-// dbからキャラクターのid、名前、weightの情報を取得
+// dbからキャラクターのgacha_character_id、名前、weightの情報を取得
 // ガチャidが引数gacha_idのキャラクターに限る
-func getCharacters(gacha_id int) []Character {
-	db := GetConnection()
+func getCharacters(gacha_id int) ([]Character, error) {
+	db, err := GetConnection()
+	if err != nil {
+		return nil, err
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	defer db_sql.Close()
 	var charactersList []Character
 	/*
-		SELECT gacha_characters.character_id, gacha_characters.character_name, rarities.weight
+		SELECT gacha_characters.gacha_character_id, characters.character_name, rarities.weight
 		FROM `gacha_characters`
+		join characters
+		on gacha_characters.character_id = characters.id
 		join rarities
-		on gacha_characters.rarity_id = rarities.rarity_id
+		on gacha_characters.rarity_id = rarities.id
 		WHERE gacha_id = 1
 	*/
-	db.Table("gacha_characters").Select("gacha_characters.character_id, gacha_characters.character_name, rarities.weight").Joins("join rarities on gacha_characters.rarity_id = rarities.rarity_id").Where("gacha_id = ?", gacha_id).Scan(&charactersList)
-	return charactersList
+	db.Table("gacha_characters").Select("gacha_characters.gacha_character_id, characters.character_name, rarities.weight").
+		Joins("join characters on gacha_characters.character_id = characters.id").
+		Joins("join rarities on gacha_characters.rarity_id = rarities.id").
+		Where("gacha_id = ?", gacha_id).Scan(&charactersList)
+	return charactersList, nil
 }
 
-// dbから全てのキャラクターのid、名前、weightの情報を取得
-func getAllCharacters() []Character {
-	db := GetConnection()
+// dbから全てのキャラクターのgacha_character_id、名前、weightの情報を取得
+func getAllCharacters() ([]Character, error) {
+	db, err := GetConnection()
+	if err != nil {
+		return nil, err
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	defer db_sql.Close()
 	var charactersList []Character
 	/*
-		SELECT gacha_characters.character_id, gacha_characters.character_name, rarities.weight
+		SELECT gacha_characters.gacha_character_id, characters.character_name, rarities.weight
 		FROM `gacha_characters`
+		join characters
+		on gacha_characters.character_id = characters.id
 		join rarities
-		on gacha_characters.rarity_id = rarities.rarity_id
+		on gacha_characters.rarity_id = rarities.id
 	*/
-	db.Table("gacha_characters").Select("gacha_characters.character_id, gacha_characters.character_name, rarities.weight").Joins("join rarities on gacha_characters.rarity_id = rarities.rarity_id").Scan(&charactersList)
-	return charactersList
+	db.Table("gacha_characters").Select("gacha_characters.gacha_character_id, characters.character_name, rarities.weight").
+		Joins("join characters on gacha_characters.character_id = characters.id").
+		Joins("join rarities on gacha_characters.rarity_id = rarities.id").
+		Scan(&charactersList)
+	return charactersList, nil
 }
 
-// 引数のcharactersListからCharacterIDが引数character_idのデータを取得
-func getCharacterInfo(charactersList []Character, character_id string) Character {
+// 引数のcharactersListからGachaCharacterIDが引数gacha_character_idのデータを取得
+func getCharacterInfo(charactersList []Character, gacha_character_id string) Character {
 	for i := 0; i < len(charactersList); i++ {
-		if charactersList[i].CharacterID == character_id {
+		if charactersList[i].GachaCharacterID == gacha_character_id {
 			return charactersList[i]
 		}
 	}
@@ -464,38 +539,51 @@ func getCharacterInfo(charactersList []Character, character_id string) Character
 }
 
 // dbのuser_charactersテーブルからuser_idが引数user_idのデータを取得
-func getUserCharacters(user_id string) []UserCharacter {
-	db := GetConnection()
+func getUserCharacters(user_id string) ([]UserCharacter, error) {
+	db, err := GetConnection()
+	if err != nil {
+		return nil, err
+	}
 	db_sql, err := db.DB()
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 	defer db_sql.Close()
 	var userCharactersList []UserCharacter
 	// SELECT * FROM `user_characters`  WHERE (user_id = '703a0b0a-1541-487e-be5b-906e9541b021')
 	db.Where("user_id = ?", user_id).Find(&userCharactersList)
-	return userCharactersList
+	return userCharactersList, nil
 }
 
 // localhost:8080/character/listでユーザが所持しているキャラクター一覧情報を取得
 // -H "x-token:yyy"でトークン情報を受け取り、認証
 func getCharacterList(w http.ResponseWriter, r *http.Request) {
-	userId := getUserId(w, r)
-	if userId == "" {
+	userId, err := getUserId(w, r)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	allCharactersList := getAllCharacters()
-	userCharactersList := getUserCharacters(userId)
+
+	allCharactersList, err := getAllCharacters()
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	userCharactersList, err := getUserCharacters(userId)
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	var characters []UserCharacterResponse
 	var userCharacterInfo UserCharacterResponse
 	if len(userCharactersList) == 0 {
 		characters = make([]UserCharacterResponse, 0)
 	} else {
 		for _, v := range userCharactersList {
-			character_id := v.CharacterID
-			character := getCharacterInfo(allCharactersList, character_id)
+			gacha_character_id := v.GachaCharacterID
+			character := getCharacterInfo(allCharactersList, gacha_character_id)
 			characterName := character.CharacterName
-			userCharacterInfo = UserCharacterResponse{UserCharacterID: v.UserCharacterID, CharacterID: character_id, Name: characterName}
+			userCharacterInfo = UserCharacterResponse{UserCharacterID: v.UserCharacterID, CharacterID: gacha_character_id, Name: characterName}
 			characters = append(characters, userCharacterInfo)
 		}
 	}
