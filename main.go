@@ -55,25 +55,39 @@ func home(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "Hello World")
 }
 
-func Success(w http.ResponseWriter, code int, data interface{}) {
-	jsonData, _ := json.Marshal(data)
-	w.Header().Add("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(jsonData)
+// レスポンスで返される
+type Response struct {
+	Payload interface{}
+	Error   *ErrorResponse
 }
 
-// Errorメッセージが入る
-type Response struct {
+// エラー時にステータスコードとメッセージが入る
+type ErrorResponse struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
 
-// Errorメッセージを返す
-func ErrorResponse(w http.ResponseWriter, code int, message string) {
-	jsonData, err := json.Marshal(&Response{
-		Code:    code,
-		Message: message,
-	})
+// レスポンスを返す
+func ReplyResponse(w http.ResponseWriter, code int, message string, data interface{}) {
+	codeStr := strconv.Itoa(code)
+	codeHead := codeStr[:1]
+	var res Response
+	if codeHead == "2" {
+		res = Response{
+			Payload: data,
+			Error:   nil,
+		}
+	} else if codeHead == "4" || codeHead == "5" {
+		errorRes := &ErrorResponse{
+			Code:    code,
+			Message: message,
+		}
+		res = Response{
+			Payload: nil,
+			Error:   errorRes,
+		}
+	}
+	jsonData, err := json.Marshal(res)
 	if err != nil {
 		log.Println("json marshal error")
 	}
@@ -139,30 +153,30 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	var user User
 	if err := json.Unmarshal(body, &user); err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 	userId, err := createUUId()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	user.UserID = userId
 
 	db, err := GetConnection()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	db_sql, err := db.DB()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	defer db_sql.Close()
@@ -173,11 +187,11 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 	// ユーザIDの文字列からjwtでトークン作成
 	token, err := createToken(userId)
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	// token = "生成されたトークンの文字列"
-	Success(w, http.StatusOK, &TokenResponse{
+	ReplyResponse(w, http.StatusOK, "", &TokenResponse{
 		Token: token,
 	})
 	// {"token":"生成されたトークンの文字列"}が返る
@@ -230,18 +244,18 @@ type UserResponse struct {
 func getUser(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	db, err := GetConnection()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	db_sql, err := db.DB()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	defer db_sql.Close()
@@ -251,18 +265,18 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 
 	instance, err := getGmtokenInstance()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	address := common.HexToAddress(user.Address)
 	bal, err := instance.BalanceOf(&bind.CallOpts{}, address)
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	balance, _ := strconv.Atoi(bal.String())
 
-	Success(w, http.StatusOK, &UserResponse{
+	ReplyResponse(w, http.StatusOK, "", &UserResponse{
 		Name:           user.Name,
 		Address:        user.Address,
 		GmtokenBalance: balance,
@@ -307,31 +321,31 @@ func getUserId(w http.ResponseWriter, r *http.Request) (string, error) {
 func updateUser(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	var user User
 	if err := json.Unmarshal(body, &user); err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	db, err := GetConnection()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	db_sql, err := db.DB()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	defer db_sql.Close()
@@ -339,7 +353,7 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 	// UPDATE `users` SET `name`='bbb' WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
 	// UPDATE `users` SET `address`='0xdD43826dD13C9a7eE66b9A28c0c9cEAD90B2d9C3' WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
 	db.Model(&user).Where("user_id = ?", userId).Update("name", user.Name).Update("address", user.Address)
-	Success(w, http.StatusOK, nil)
+	ReplyResponse(w, http.StatusOK, "", nil)
 }
 
 type Drawing struct {
@@ -535,54 +549,54 @@ func burnGmtoken(val int, privateKey *ecdsa.PrivateKey, fromAddress common.Addre
 func drawGacha(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	var drawing Drawing
 	if err := json.Unmarshal(body, &drawing); err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 	contains, err := gachaIdContains(drawing.GachaID)
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	if !contains {
-		ErrorResponse(w, http.StatusBadRequest, "gacha_id is error.")
+		ReplyResponse(w, http.StatusBadRequest, "gacha_id is error.", nil)
 		return
 	}
 	// 0以下回だけガチャを引くことは出来ない
 	if drawing.Times <= 0 {
-		ErrorResponse(w, http.StatusBadRequest, "times is error.")
+		ReplyResponse(w, http.StatusBadRequest, "times is error.", nil)
 		return
 	}
 	enoughBal, err := checkBalance(userId, drawing.Times)
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	if !enoughBal {
-		ErrorResponse(w, http.StatusBadRequest, "Balance of GameToken is not enough.")
+		ReplyResponse(w, http.StatusBadRequest, "Balance of GameToken is not enough.", nil)
 		return
 	}
 
 	db, err := GetConnection()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	db_sql, err := db.DB()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	defer db_sql.Close()
@@ -592,22 +606,22 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 
 	privateKey, fromAddress, err := keyToAddress(drawing.PrivateKey)
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	// 秘密鍵から生成されたアドレス(fromAddress)とdbに格納されたアドレス(address)が一致するか確認
 	if fromAddress.String() != user.Address {
-		ErrorResponse(w, http.StatusBadRequest, "private key is not collect")
+		ReplyResponse(w, http.StatusBadRequest, "private key is not collect", nil)
 		return
 	}
 	if err := burnGmtoken(drawing.Times, privateKey, fromAddress); err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 
 	charactersList, err := getCharacters(drawing.GachaID)
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	gachaCharacterIdsDrawed := drawGachaCharacterIds(charactersList, drawing.Times)
@@ -621,7 +635,7 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 		results = append(results, characterInfo)
 		userCharacterId, err := createUUId()
 		if err != nil {
-			ErrorResponse(w, http.StatusInternalServerError, err.Error())
+			ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 			return
 		}
 		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, GachaCharacterID: gacha_character_id}
@@ -646,7 +660,7 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 		*/
 		db.Create(&userCharacters)
 	}
-	Success(w, http.StatusOK, &ResultResponse{
+	ReplyResponse(w, http.StatusOK, "", &ResultResponse{
 		Results: results,
 	})
 	/*
@@ -766,18 +780,18 @@ func getUserCharacters(user_id string) ([]UserCharacter, error) {
 func getCharacterList(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
-		ErrorResponse(w, http.StatusBadRequest, err.Error())
+		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
 
 	allCharactersList, err := getAllCharacters()
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	userCharactersList, err := getUserCharacters(userId)
 	if err != nil {
-		ErrorResponse(w, http.StatusInternalServerError, err.Error())
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 	var characters []UserCharacterResponse
@@ -793,7 +807,7 @@ func getCharacterList(w http.ResponseWriter, r *http.Request) {
 			characters = append(characters, userCharacterInfo)
 		}
 	}
-	Success(w, http.StatusOK, &CharactersResponse{
+	ReplyResponse(w, http.StatusOK, "", &CharactersResponse{
 		Characters: characters,
 	})
 	/*
