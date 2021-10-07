@@ -46,6 +46,9 @@ func main() {
 	router.HandleFunc("/gacha/draw", drawGacha).Methods("POST")
 	// キャラクター関連API
 	router.HandleFunc("/character/list", getCharacterList).Methods("GET")
+	// 乱数のシード値を設定
+	seed, _ := crand.Int(crand.Reader, big.NewInt(math.MaxInt64))
+	rand.Seed(seed.Int64())
 	// ポートを8080で指定してRouter起動
 	log.Fatal(http.ListenAndServe(":8080", router))
 }
@@ -681,9 +684,6 @@ func drawGachaCharacterIds(charactersList []Character, times int) []string {
 	for i := 0; i < len(charactersList); i++ {
 		choices = append(choices, wr.Choice{Item: charactersList[i].GachaCharacterID, Weight: charactersList[i].Weight})
 	}
-	seed, _ := crand.Int(crand.Reader, big.NewInt(math.MaxInt64))
-	rand.Seed(seed.Int64())
-	//rand.Seed(time.Now().UTC().UnixNano())
 	var gachaCharacterIdsDrawed []string
 	for i := 0; i < times; i++ {
 		chooser, _ := wr.NewChooser(choices...)
