@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"crypto/ecdsa"
 	crand "crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -18,18 +16,18 @@ import (
 	"github.com/dgrijalva/jwt-go"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	wr "github.com/mroth/weightedrand"
-	"golang.org/x/crypto/sha3"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-	"local.packages/gmtoken"
-
+	gmtoken "local.packages/gmtoken"
+	transaction "local.packages/transaction"
+	
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -139,9 +137,9 @@ func GetConnection() (*gorm.DB, error) {
 }
 
 type User struct {
-	UserID  string `json:"user_id"`
-	Name    string `json:"name"`
-	Address string `json:"address"`
+	UserID     string `json:"user_id"`
+	Name       string `json:"name"`
+	PrivateKey string `json:"private_key"`
 }
 
 type TokenResponse struct {
@@ -149,7 +147,7 @@ type TokenResponse struct {
 }
 
 // localhost:8080/user/createでユーザ情報を作成
-// -d {"name":"aaa", "address":"0x7a242084216fC7810aAe02c6deE5D9092C6B8fb9"}で名前とアドレス情報を受け取る
+// -d {"name":"aaa"}で名前データを受け取る
 // UUIDでユーザIDを生成する
 // ユーザIDからjwtでトークンを作成し、トークンを返す
 func createUser(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +169,19 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user.UserID = userId
+	// 新規ユーザの秘密鍵を生成
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+	}
+	privateKeyBytes := crypto.FromECDSA(privateKey)
+	privateKeyHex := hexutil.Encode(privateKeyBytes)[2:]
+	user.PrivateKey = privateKeyHex
+	// ゲームトークンを100だけ鋳造し、新規ユーザに付与
+	if err := transaction.MintGmtoken(100, user.PrivateKey); err != nil {
+		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		return
+	}
 
 	db, err := GetConnection()
 	if err != nil {
@@ -184,7 +195,8 @@ func createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	defer db_sql.Close()
 	/*
-		INSERT INTO `users` (`user_id`,`name`) VALUES ('95daec2b-287c-4358-ba6f-5c29e1c3cbdf','aaa')
+		INSERT INTO `users` (`user_id`,`name`,`private_key`)
+		VALUES ('95daec2b-287c-4358-ba6f-5c29e1c3cbdf','aaa','6e7eada90afb7e84bf5b4498c6adaa2d4014904644637d5fb355266944fbf93a')
 	*/
 	db.Create(&user)
 	// ユーザIDの文字列からjwtでトークン作成
@@ -224,7 +236,7 @@ func createToken(userID string) (string, error) {
 	return tokenString, nil
 }
 
-// UUIDでユーザIDを生成
+// UUIDを生成
 func createUUId() (string, error) {
 	u, err := uuid.NewRandom()
 	if err != nil {
@@ -242,8 +254,9 @@ type UserResponse struct {
 }
 
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
-// トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前とアドレス情報を取り出し、返す
-// コントラクトからユーザアドレスのゲームトークン残高を取り出し、返す
+// トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの名前と秘密鍵データを取り出す
+// 秘密鍵からユーザアドレスを生成
+// コントラクトからそのユーザアドレスのゲームトークン残高を取り出し、返す
 func getUser(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
@@ -265,23 +278,16 @@ func getUser(w http.ResponseWriter, r *http.Request) {
 	var user User
 	// SELECT * FROM `users` WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
 	db.Where("user_id = ?", userId).Find(&user)
-
-	instance, err := getGmtokenInstance()
+	
+	address, balance, err := getAddressBalance(user.PrivateKey)
 	if err != nil {
 		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
-	address := common.HexToAddress(user.Address)
-	bal, err := instance.BalanceOf(&bind.CallOpts{}, address)
-	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
-		return
-	}
-	balance, _ := strconv.Atoi(bal.String())
 
 	ReplyResponse(w, http.StatusOK, "", &UserResponse{
 		Name:           user.Name,
-		Address:        user.Address,
+		Address:        address.String(),
 		GmtokenBalance: balance,
 	})
 	// {"name":"aaa","address":"0x7a242084216fC7810aAe02c6deE5D9092C6B8fb9","gmtoken_balance":40}が返る
@@ -305,7 +311,7 @@ func verifyToken(tokenString string) (*jwt.Token, error) {
 }
 
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
-// トークンから名前情報を取り出し、返す
+// トークンからユーザID情報を取り出し、返す
 func getUserId(w http.ResponseWriter, r *http.Request) (string, error) {
 	tokenString := r.Header.Get("x-token")
 	token, err := verifyToken(tokenString)
@@ -318,8 +324,28 @@ func getUserId(w http.ResponseWriter, r *http.Request) (string, error) {
 	return userId, nil
 }
 
+// 引数の秘密鍵hexkeyからアドレスを生成
+// コントラクトからそのアドレスのゲームトークン残高を取り出す
+// アドレスと残高を返す
+func getAddressBalance(hexkey string) (common.Address, int, error) {
+	instance, err := getGmtokenInstance()
+	if err != nil {
+		return common.Address{}, 0, err
+	}
+	address, err := transaction.ConvertKeyToAddress(hexkey)
+	if err != nil {
+		return common.Address{}, 0, err
+	}
+	bal, err := instance.BalanceOf(&bind.CallOpts{}, address)
+	if err != nil {
+		return common.Address{}, 0, err
+	}
+	balance, _ := strconv.Atoi(bal.String())
+	return address, balance, nil
+}
+
 // -H "x-token:yyy"でトークン情報を受け取り、ユーザ認証
-// -d {"name":"bbb", "address":"0xdD43826dD13C9a7eE66b9A28c0c9cEAD90B2d9C3"}で更新する名前とアドレス情報を受け取る
+// -d {"name":"bbb"}で更新する名前データを受け取る
 // トークンからユーザIDを取り出し、dbからそのユーザIDのユーザの情報を更新
 func updateUser(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
@@ -354,15 +380,13 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 	defer db_sql.Close()
 	// dbでnameとaddressを更新
 	// UPDATE `users` SET `name`='bbb' WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
-	// UPDATE `users` SET `address`='0xdD43826dD13C9a7eE66b9A28c0c9cEAD90B2d9C3' WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
-	db.Model(&user).Where("user_id = ?", userId).Update("name", user.Name).Update("address", user.Address)
+	db.Model(&user).Where("user_id = ?", userId).Update("name", user.Name)
 	ReplyResponse(w, http.StatusOK, "", nil)
 }
 
-type Drawing struct {
-	GachaID    int    `json:"gacha_id"`
-	Times      int    `json:"times"`
-	PrivateKey string `json:"private_key"`
+type DrawingGacha struct {
+	GachaID int `json:"gacha_id"`
+	Times   int `json:"times"`
 }
 
 type Character struct {
@@ -437,118 +461,18 @@ func checkBalance(userId string, times int) (bool, error) {
 	var user User
 	// SELECT * FROM `users` WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
 	db.Where("user_id = ?", userId).Find(&user)
-
-	instance, err := getGmtokenInstance()
+	
+	_, balance, err := getAddressBalance(user.PrivateKey)
 	if err != nil {
 		return false, err
 	}
-	address := common.HexToAddress(user.Address)
-	bal, err := instance.BalanceOf(&bind.CallOpts{}, address)
-	if err != nil {
-		return false, err
-	}
-	balance, _ := strconv.Atoi(bal.String())
+	
 	return times <= balance, nil
-}
-
-// 16進数の秘密鍵文字列からイーサリアムアカウントのアドレスを生成
-func keyToAddress(hexkey string) (*ecdsa.PrivateKey, common.Address, error) {
-	// 16進数の秘密鍵文字列を読み込む
-	privateKey, err := crypto.HexToECDSA(hexkey)
-	if err != nil {
-		return nil, common.Address{}, err
-	}
-	// 秘密鍵から公開鍵を生成
-	publicKey := privateKey.Public()
-	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
-	if !ok {
-		return nil, common.Address{}, fmt.Errorf("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
-	}
-	// 公開鍵からアドレスを生成
-	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
-	return privateKey, fromAddress, nil
-}
-
-// コントラクトから、引数valだけゲームトークンを焼却する
-func burnGmtoken(val int, privateKey *ecdsa.PrivateKey, fromAddress common.Address) error {
-	client, err := ethclient.Dial("ws://localhost:7545")
-	if err != nil {
-		return err
-	}
-	// ナンスを生成
-	nonce, err := client.PendingNonceAt(context.Background(), fromAddress)
-	if err != nil {
-		return err
-	}
-	// 転送するイーサの量を設定(ここでは0)
-	value := big.NewInt(0)
-	// ガス価格を設定（SuggestGasPriceで平均のガス価格を取得）
-	gasPrice, err := client.SuggestGasPrice(context.Background())
-	if err != nil {
-		return err
-	}
-	// fmt.Println(gasPrice) // 20000000000
-	// GameTokenコントラクトのアドレスを読み込む
-	contractAddressBytes, err := ioutil.ReadFile("./GameToken_address.txt")
-	if err != nil {
-		return err
-	}
-	contractAddress := common.HexToAddress(string(contractAddressBytes))
-	// スマートコントラクトのburn関数
-	burnFnSignature := []byte("burn(uint256)")
-	// Keccak256ハッシュを生成
-	hash := sha3.NewLegacyKeccak256()
-	hash.Write(burnFnSignature)
-	methodID := hash.Sum(nil)[:4]
-	// fmt.Println(hexutil.Encode(methodID)) // 0x42966c68
-	// 転送するゲームトークンの量を設定
-	amount := new(big.Int)
-	amount.SetString(strconv.Itoa(val), 10)
-	// 32バイト幅まで左側を0で埋める
-	paddedAmount := common.LeftPadBytes(amount.Bytes(), 32)
-	// fmt.Println(hexutil.Encode(paddedAmount)) // 0x000000000000000000000000000000000000000000000000000000000000000a
-	// メソッドIDと32バイト幅トークン量を連結
-	var data []byte
-	data = append(data, methodID...)
-	data = append(data, paddedAmount...)
-	/*
-		// EstimateGasでガス制限を推定
-		gasLimit, err := client.EstimateGas(context.Background(), ethereum.CallMsg{
-			To:   &contractAddress,
-			Data: data,
-		})
-		if err != nil {
-			return err
-		}
-	*/
-	var gasLimit uint64 = 10000000
-	// ナンス、コントラクトのアドレス、転送するイーサ量(0)、ガス制限、ガス価格、データからトランザクションを作成
-	tx := types.NewTransaction(nonce, contractAddress, value, gasLimit, gasPrice, data)
-	// チェーンID(ネットワークID)を取得
-	chainID, err := client.NetworkID(context.Background())
-	if err != nil {
-		return err
-	}
-	// fmt.Println(chainID) // 5777
-	// 送信者の秘密鍵を使用してトランザクションに署名
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privateKey)
-	if err != nil {
-		return err
-	}
-	// fmt.Println(signedTx) // &{0xc000580540 {13857227167482291968 173117014001 0xef1f20} {<nil>} {<nil>} {<nil>}}
-	// トランザクションを送信
-	err = client.SendTransaction(context.Background(), signedTx)
-	if err != nil {
-		return err
-	}
-
-	// fmt.Printf("tx sent: %s", signedTx.Hash().Hex()) // tx sent: 0xf98c12a353eceacafe606397493d0d321628f1a70bb147697d1539a2a9ca9199
-	return nil
 }
 
 // localhost:8080/gacha/drawでガチャを引いて、キャラクターを取得
 // -H "x-token:yyy"でトークン情報を受け取り、認証
-// -d {"gacha_id":n, "times":x, "private_key":"qqqqq"}でどのガチャを引くか、ガチャを何回引くかと、秘密鍵の情報を受け取る
+// -d {"gacha_id":n, "times":x}でどのガチャを引くか、ガチャを何回引くかの情報を受け取る
 func drawGacha(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
@@ -563,12 +487,12 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var drawing Drawing
-	if err := json.Unmarshal(body, &drawing); err != nil {
+	var drawingGacha DrawingGacha
+	if err := json.Unmarshal(body, &drawingGacha); err != nil {
 		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-	contains, err := gachaIdContains(drawing.GachaID)
+	contains, err := gachaIdContains(drawingGacha.GachaID)
 	if err != nil {
 		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
@@ -578,11 +502,11 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 0以下回だけガチャを引くことは出来ない
-	if drawing.Times <= 0 {
+	if drawingGacha.Times <= 0 {
 		ReplyResponse(w, http.StatusBadRequest, "times is error.", nil)
 		return
 	}
-	enoughBal, err := checkBalance(userId, drawing.Times)
+	enoughBal, err := checkBalance(userId, drawingGacha.Times)
 	if err != nil {
 		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
@@ -606,28 +530,18 @@ func drawGacha(w http.ResponseWriter, r *http.Request) {
 	var user User
 	// SELECT * FROM `users` WHERE user_id = '95daec2b-287c-4358-ba6f-5c29e1c3cbdf'
 	db.Where("user_id = ?", userId).Find(&user)
-
-	privateKey, fromAddress, err := keyToAddress(drawing.PrivateKey)
-	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
-		return
-	}
-	// 秘密鍵から生成されたアドレス(fromAddress)とdbに格納されたアドレス(address)が一致するか確認
-	if fromAddress.String() != user.Address {
-		ReplyResponse(w, http.StatusBadRequest, "private key is not collect", nil)
-		return
-	}
-	if err := burnGmtoken(drawing.Times, privateKey, fromAddress); err != nil {
+	// drawingGacha.Times分だけゲームトークンを焼却
+	if err := transaction.BurnGmtoken(drawingGacha.Times, user.PrivateKey); err != nil {
 		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
 
-	charactersList, err := getCharacters(drawing.GachaID)
+	charactersList, err := getCharacters(drawingGacha.GachaID)
 	if err != nil {
 		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
 		return
 	}
-	gachaCharacterIdsDrawed := drawGachaCharacterIds(charactersList, drawing.Times)
+	gachaCharacterIdsDrawed := drawGachaCharacterIds(charactersList, drawingGacha.Times)
 	var characterInfo CharacterResponse
 	var results []CharacterResponse
 	var userCharacters []UserCharacter
