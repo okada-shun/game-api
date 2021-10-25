@@ -25,18 +25,18 @@ type UserResponse struct {
 func GetUser(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
-		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
+		RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	db, err := GetConnection()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	db_sql, err := db.DB()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer db_sql.Close()
@@ -46,11 +46,11 @@ func GetUser(w http.ResponseWriter, r *http.Request) {
 	
 	address, balance, err := getAddressBalance(user.PrivateKey)
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	ReplyResponse(w, http.StatusOK, "", &UserResponse{
+	RespondWithJSON(w, http.StatusOK, &UserResponse{
 		Name:           user.Name,
 		Address:        address.String(),
 		GmtokenBalance: balance,

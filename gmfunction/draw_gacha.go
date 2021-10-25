@@ -42,54 +42,54 @@ type ResultResponse struct {
 func DrawGacha(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
-		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
+		RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
+		RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	var drawingGacha DrawingGacha
 	if err := json.Unmarshal(body, &drawingGacha); err != nil {
-		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
+		RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	contains, err := gachaIdContains(drawingGacha.GachaID)
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !contains {
-		ReplyResponse(w, http.StatusBadRequest, "gacha_id is error.", nil)
+		RespondWithError(w, http.StatusBadRequest, "gacha_id is error.")
 		return
 	}
 	// 0以下回だけガチャを引くことは出来ない
 	if drawingGacha.Times <= 0 {
-		ReplyResponse(w, http.StatusBadRequest, "times is error.", nil)
+		RespondWithError(w, http.StatusBadRequest, "times is error.")
 		return
 	}
 	enoughBal, err := checkBalance(userId, drawingGacha.Times)
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if !enoughBal {
-		ReplyResponse(w, http.StatusBadRequest, "Balance of GameToken is not enough.", nil)
+		RespondWithError(w, http.StatusBadRequest, "Balance of GameToken is not enough.")
 		return
 	}
 
 	db, err := GetConnection()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	db_sql, err := db.DB()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer db_sql.Close()
@@ -98,13 +98,13 @@ func DrawGacha(w http.ResponseWriter, r *http.Request) {
 	db.Where("user_id = ?", userId).Find(&user)
 	// drawingGacha.Times分だけゲームトークンを焼却
 	if err := transaction.BurnGmtoken(drawingGacha.Times, user.PrivateKey); err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	charactersList, err := getCharacters(drawingGacha.GachaID)
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	gachaCharacterIdsDrawed := drawGachaCharacterIds(charactersList, drawingGacha.Times)
@@ -118,7 +118,7 @@ func DrawGacha(w http.ResponseWriter, r *http.Request) {
 		results = append(results, characterInfo)
 		userCharacterId, err := createUUId()
 		if err != nil {
-			ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+			RespondWithError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		userCharacter := UserCharacter{UserCharacterID: userCharacterId, UserID: userId, GachaCharacterID: gacha_character_id}
@@ -143,7 +143,7 @@ func DrawGacha(w http.ResponseWriter, r *http.Request) {
 		*/
 		db.Create(&userCharacters)
 	}
-	ReplyResponse(w, http.StatusOK, "", &ResultResponse{
+	RespondWithJSON(w, http.StatusOK, &ResultResponse{
 		Results: results,
 	})
 	/*

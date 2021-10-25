@@ -31,43 +31,43 @@ func CreateUser(w http.ResponseWriter, r *http.Request) {
 	body, err := ioutil.ReadAll(r.Body)
 	defer r.Body.Close()
 	if err != nil {
-		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
+		RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	var user User
 	if err := json.Unmarshal(body, &user); err != nil {
-		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
+		RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	userId, err := createUUId()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	user.UserID = userId
 	// 新規ユーザの秘密鍵を生成
 	privateKey, err := crypto.GenerateKey()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 	}
 	privateKeyBytes := crypto.FromECDSA(privateKey)
 	privateKeyHex := hexutil.Encode(privateKeyBytes)[2:]
 	user.PrivateKey = privateKeyHex
 	// ゲームトークンを100だけ鋳造し、新規ユーザに付与
 	if err := transaction.MintGmtoken(100, user.PrivateKey); err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	db, err := GetConnection()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	db_sql, err := db.DB()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer db_sql.Close()
@@ -79,11 +79,11 @@ func CreateUser(w http.ResponseWriter, r *http.Request) {
 	// ユーザIDの文字列からjwtでトークン作成
 	token, err := createToken(userId)
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	// token = "生成されたトークンの文字列"
-	ReplyResponse(w, http.StatusOK, "", &TokenResponse{
+	RespondWithJSON(w, http.StatusOK, &TokenResponse{
 		Token: token,
 	})
 	// {"token":"生成されたトークンの文字列"}が返る

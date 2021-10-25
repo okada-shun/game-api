@@ -21,18 +21,18 @@ type CharactersResponse struct {
 func GetCharacterList(w http.ResponseWriter, r *http.Request) {
 	userId, err := getUserId(w, r)
 	if err != nil {
-		ReplyResponse(w, http.StatusBadRequest, err.Error(), nil)
+		RespondWithError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	allCharactersList, err := getAllCharacters()
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	userCharactersList, err := getUserCharacters(userId)
 	if err != nil {
-		ReplyResponse(w, http.StatusInternalServerError, err.Error(), nil)
+		RespondWithError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	var characters []UserCharacterResponse
@@ -48,7 +48,7 @@ func GetCharacterList(w http.ResponseWriter, r *http.Request) {
 			characters = append(characters, userCharacterInfo)
 		}
 	}
-	ReplyResponse(w, http.StatusOK, "", &CharactersResponse{
+	RespondWithJSON(w, http.StatusOK, &CharactersResponse{
 		Characters: characters,
 	})
 	/*
