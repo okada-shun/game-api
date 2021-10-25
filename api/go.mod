@@ -1,4 +1,4 @@
-module local.packages/gmfunction
+module local.packages/api
 
 go 1.17
 
@@ -8,7 +8,7 @@ replace local.packages/transaction => ../transaction
 
 require (
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible
-	github.com/ethereum/go-ethereum v1.10.10
+	github.com/ethereum/go-ethereum v1.10.11
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/google/uuid v1.3.0
 	github.com/mroth/weightedrand v0.4.1

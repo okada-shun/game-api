@@ -1,4 +1,4 @@
-package gmfunction
+package api
 
 import (
 	"net/http"
