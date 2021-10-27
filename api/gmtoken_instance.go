@@ -7,15 +7,23 @@ import (
 	gmtoken "local.packages/gmtoken"
 )
 
+// イーサリアムネットワークに接続するクライアントを取得
+func getEthclient(url string) (*ethclient.Client, error) {
+	client, err := ethclient.Dial(url)
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
 // Gmtokenのインスタンスを取得
-func getGmtokenInstance() (*gmtoken.Gmtoken, error) {
-	// localhost:7545(ganacheテストネット)に接続するクライアントを取得
-	client, err := ethclient.Dial("ws://localhost:7545")
+func getGmtokenInstance(url string, addressfile string) (*gmtoken.Gmtoken, error) {
+	client, err := ethclient.Dial(url)
 	if err != nil {
 		return nil, err
 	}
 	// GameTokenコントラクトのアドレスを読み込む
-	contractAddressBytes, err := ioutil.ReadFile("./GameToken_address.txt")
+	contractAddressBytes, err := ioutil.ReadFile(addressfile)
 	if err != nil {
 		return nil, err
 	}
