@@ -13,7 +13,7 @@ require (
 	github.com/btcsuite/btcd v0.20.1-beta // indirect
 	github.com/deckarep/golang-set v0.0.0-20180603214616-504e848d77ea // indirect
 	github.com/dgrijalva/jwt-go v3.2.0+incompatible // indirect
-	github.com/ethereum/go-ethereum v1.10.10 // indirect
+	github.com/ethereum/go-ethereum v1.10.11 // indirect
 	github.com/go-ole/go-ole v1.2.1 // indirect
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/google/uuid v1.3.0 // indirect
@@ -31,11 +31,8 @@ require (
 	gorm.io/driver/mysql v1.1.2 // indirect
 	gorm.io/gorm v1.21.16 // indirect
 	local.packages/gmtoken v0.0.0-00010101000000-000000000000 // indirect
-	local.packages/transaction v0.0.0-00010101000000-000000000000 // indirect
 )
 
 replace local.packages/gmtoken => ./gmtoken
-
-replace local.packages/transaction => ./transaction
 
 replace local.packages/api => ./api

@@ -8,13 +8,13 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// DataBase(game_user)からコネクション取得
-func GetConnection() (*gorm.DB, error) {
-	passwordBytes, err := ioutil.ReadFile("../.ssh/mysql_password")
+// DB(game_user)からコネクション取得
+func GetConnection(passwordfile string, userfile string) (*gorm.DB, error) {
+	passwordBytes, err := ioutil.ReadFile(passwordfile)
 	if err != nil {
 		return nil, err
 	}
-	userBytes, err := ioutil.ReadFile("../.ssh/mysql_user")
+	userBytes, err := ioutil.ReadFile(userfile)
 	if err != nil {
 		return nil, err
 	}
